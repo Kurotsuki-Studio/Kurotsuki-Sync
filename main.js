@@ -39,6 +39,7 @@ var AwarenessManager = class {
   constructor(user) {
     this.remotePeers = /* @__PURE__ */ new Map();
     this.listeners = /* @__PURE__ */ new Set();
+    this.localListeners = /* @__PURE__ */ new Set();
     this.cleanupInterval = null;
     const randomClientId = Math.floor(Math.random() * 1e6) + 1;
     this.localState = {
@@ -62,6 +63,7 @@ var AwarenessManager = class {
     this.localState.user = { ...this.localState.user, ...user };
     this.localState.lastActive = Date.now();
     this.notify();
+    this.notifyLocal();
   }
   updateActiveFile(path) {
     if (this.localState.activeFile !== path) {
@@ -69,12 +71,14 @@ var AwarenessManager = class {
       this.localState.cursor = null;
       this.localState.lastActive = Date.now();
       this.notify();
+      this.notifyLocal();
     }
   }
   updateCursor(cursor) {
     this.localState.cursor = cursor;
     this.localState.lastActive = Date.now();
     this.notify();
+    this.notifyLocal();
   }
   handleRemoteAwareness(states) {
     const now = Date.now();
@@ -113,6 +117,16 @@ var AwarenessManager = class {
     listener(this.getAllRemotePeers());
     return () => this.listeners.delete(listener);
   }
+  onLocalChange(listener) {
+    this.localListeners.add(listener);
+    return () => this.localListeners.delete(listener);
+  }
+  notifyLocal() {
+    const local = this.getLocalState();
+    for (const listener of this.localListeners) {
+      listener(local);
+    }
+  }
   pruneStalePeers() {
     const now = Date.now();
     let changed = false;
@@ -137,6 +151,7 @@ var AwarenessManager = class {
       window.clearInterval(this.cleanupInterval);
     }
     this.listeners.clear();
+    this.localListeners.clear();
     this.remotePeers.clear();
   }
 };
@@ -147,6 +162,7 @@ var import_state2 = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 var remoteSyncAnnotation = import_state.Annotation.define();
 var setReadOnlyEffect = import_state.StateEffect.define();
+var awarenessEffect = import_state.StateEffect.define();
 var readOnlyField = import_state.StateField.define({
   create: () => false,
   update: (val, tr) => {
@@ -157,6 +173,20 @@ var readOnlyField = import_state.StateField.define({
     return val;
   }
 });
+function hexToRgba(hex, alpha = 0.25) {
+  if (!hex || !hex.startsWith("#"))
+    return `rgba(59, 130, 246, ${alpha})`;
+  let c = hex.substring(1);
+  if (c.length === 3)
+    c = c.split("").map((x) => x + x).join("");
+  const num = parseInt(c, 16);
+  if (isNaN(num))
+    return `rgba(59, 130, 246, ${alpha})`;
+  const r = num >> 16 & 255;
+  const g = num >> 8 & 255;
+  const b = num & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 var RemoteCursorWidget = class extends import_view.WidgetType {
   constructor(user) {
     super();
@@ -165,12 +195,11 @@ var RemoteCursorWidget = class extends import_view.WidgetType {
   toDOM() {
     const cursor = document.createElement("span");
     cursor.className = "cm-kurotsuki-cursor";
-    cursor.style.borderLeft = `2px solid ${this.user.color}`;
-    cursor.style.height = "1.2em";
+    cursor.style.borderLeftColor = this.user.color || "#3b82f6";
     const label = document.createElement("span");
     label.className = "cm-kurotsuki-cursor-label";
-    label.style.backgroundColor = this.user.color;
-    label.textContent = this.user.name;
+    label.style.backgroundColor = this.user.color || "#3b82f6";
+    label.textContent = this.user.name || "Collaborator";
     cursor.appendChild(label);
     return cursor;
   }
@@ -194,7 +223,11 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         this.isDispatchingRemote = false;
         this.decorations = this.buildDecorations(view);
         this.unsubscribeAwareness = awareness.subscribe(() => {
-          view.requestMeasure();
+          if (this.view.dom && this.view.dom.isConnected) {
+            this.view.dispatch({
+              effects: [awarenessEffect.of()]
+            });
+          }
         });
         this.updateBanner(view);
         this.syncReadOnlyState(view);
@@ -276,7 +309,10 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
       update(update) {
         this.bindActiveYDoc();
         this.syncReadOnlyState(update.view);
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        const hasAwarenessEffect = update.transactions.some(
+          (tr) => tr.effects.some((e) => e.is(awarenessEffect))
+        );
+        if (update.docChanged || update.viewportChanged || update.selectionSet || hasAwarenessEffect) {
           this.decorations = this.buildDecorations(update.view);
         }
         if (update.docChanged && !this.isDispatchingRemote) {
@@ -348,7 +384,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           return builder.finish();
         const peers = awareness.getActivePeersForFile(currentPath);
         const docLength = view.state.doc.length;
-        const cursorEntries = [];
+        const items = [];
         for (const peer of peers) {
           if (!peer.cursor)
             continue;
@@ -357,37 +393,42 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           const safeFrom = Math.max(0, Math.min(from2, docLength));
           const safeTo = Math.max(0, Math.min(to, docLength));
           const safeHead = Math.max(0, Math.min(peer.cursor.head, docLength));
-          if (safeFrom !== safeTo) {
-            cursorEntries.push({
-              pos: safeFrom,
-              peer,
-              isHead: false,
-              range: { from: safeFrom, to: safeTo }
-            });
-          }
-          cursorEntries.push({
-            pos: safeHead,
-            peer,
-            isHead: true
-          });
-        }
-        cursorEntries.sort((a, b) => a.pos - b.pos);
-        for (const entry of cursorEntries) {
-          if (entry.isHead) {
-            const widget = import_view.Decoration.widget({
-              widget: new RemoteCursorWidget(entry.peer.user),
-              side: 1
-            });
-            builder.add(entry.pos, entry.pos, widget);
-          } else if (entry.range) {
-            const mark = import_view.Decoration.mark({
+          if (safeFrom < safeTo) {
+            const markDeco = import_view.Decoration.mark({
               class: "cm-kurotsuki-selection",
               attributes: {
-                style: `background-color: ${entry.peer.user.color};`
+                style: `background-color: ${hexToRgba(peer.user.color || "#3b82f6", 0.28)} !important;`
               }
             });
-            builder.add(entry.range.from, entry.range.to, mark);
+            items.push({
+              from: safeFrom,
+              to: safeTo,
+              isWidget: false,
+              deco: markDeco
+            });
           }
+          const widgetDeco = import_view.Decoration.widget({
+            widget: new RemoteCursorWidget(peer.user),
+            side: 1
+          });
+          items.push({
+            from: safeHead,
+            to: safeHead,
+            isWidget: true,
+            deco: widgetDeco
+          });
+        }
+        items.sort((a, b) => {
+          if (a.from !== b.from)
+            return a.from - b.from;
+          if (!a.isWidget && b.isWidget)
+            return -1;
+          if (a.isWidget && !b.isWidget)
+            return 1;
+          return a.to - b.to;
+        });
+        for (const item of items) {
+          builder.add(item.from, item.to, item.deco);
         }
         return builder.finish();
       }
@@ -878,7 +919,7 @@ var floor = Math.floor;
 var abs = Math.abs;
 var min = (a, b) => a < b ? a : b;
 var max = (a, b) => a > b ? a : b;
-var isNaN = Number.isNaN;
+var isNaN2 = Number.isNaN;
 var isNegativeZero = (n) => n !== 0 ? n < 0 : 1 / n < 0;
 
 // node_modules/lib0/binary.js
@@ -928,8 +969,8 @@ var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 var MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
 var LOWEST_INT32 = 1 << 31;
 var isInteger = Number.isInteger || ((num) => typeof num === "number" && isFinite(num) && floor(num) === num);
-var isNaN2 = Number.isNaN;
-var parseInt = Number.parseInt;
+var isNaN3 = Number.isNaN;
+var parseInt2 = Number.parseInt;
 
 // node_modules/lib0/string.js
 var fromCharCode = String.fromCharCode;
@@ -9914,15 +9955,25 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
     avatar.textContent = (state.user.name || "?").charAt(0).toUpperCase();
     const body = card.createDiv({ cls: "kurotsuki-peer-sidebar-body" });
     const nameRow = body.createDiv({ cls: "kurotsuki-peer-name-row" });
-    nameRow.createEl("span", { cls: "kurotsuki-peer-name", text: state.user.name });
+    nameRow.createEl("strong", { cls: "kurotsuki-peer-name", text: state.user.name });
     if (isSelf) {
       nameRow.createSpan({ cls: "kurotsuki-badge-self", text: "You" });
     }
+    if (state.user.role) {
+      nameRow.createSpan({
+        cls: `kurotsuki-role-badge kurotsuki-role-${state.user.role}`,
+        text: state.user.role.toUpperCase()
+      });
+    }
     const noteRow = body.createDiv({ cls: "kurotsuki-peer-note-row" });
+    const currentActivePath = this.app.workspace.getActiveFile()?.path;
     if (state.activeFile) {
+      const isSameDoc = currentActivePath === state.activeFile;
+      const fileName = state.activeFile.split("/").pop() || state.activeFile;
       const fileLink = noteRow.createEl("a", {
-        cls: "kurotsuki-note-link",
-        text: `\u{1F4C4} ${state.activeFile}`
+        cls: `kurotsuki-note-link ${isSameDoc ? "kurotsuki-note-same" : ""}`,
+        text: `\u{1F4DD} ${fileName}`,
+        attr: { title: `Click to open: ${state.activeFile}` }
       });
       fileLink.onclick = async (e) => {
         e.preventDefault();
@@ -9930,14 +9981,22 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
           await this.app.workspace.openLinkText(state.activeFile, "", false);
         }
       };
+      if (isSameDoc) {
+        noteRow.createSpan({ cls: "kurotsuki-badge-here", text: "\u{1F7E2} With you" });
+      }
     } else {
-      noteRow.createSpan({ cls: "kurotsuki-peer-idle", text: "Idle (no note opened)" });
+      noteRow.createSpan({ cls: "kurotsuki-peer-idle", text: "\u{1F4A4} Inactive / No note open" });
     }
     if (state.cursor) {
-      body.createDiv({
-        cls: "kurotsuki-peer-cursor-info",
-        text: `pos: ${state.cursor.head}`
-      });
+      const cursorRow = body.createDiv({ cls: "kurotsuki-peer-cursor-info" });
+      const selLen = Math.abs(state.cursor.head - state.cursor.anchor);
+      if (selLen > 0) {
+        const from2 = Math.min(state.cursor.anchor, state.cursor.head);
+        const to = Math.max(state.cursor.anchor, state.cursor.head);
+        cursorRow.innerHTML = `\u{1F4CD} Curseur: <strong>${state.cursor.head}</strong> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || "#3b82f6"};">\u2702\uFE0F ${selLen} car. (${from2}\u2192${to})</span>`;
+      } else {
+        cursorRow.innerHTML = `\u{1F4CD} Curseur: <strong>${state.cursor.head}</strong>`;
+      }
     }
   }
 };
@@ -10349,6 +10408,7 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.awarenessBroadcastInterval = null;
+    this.awarenessDebounceTimer = null;
     this.lastReadOnlyNoticeTime = 0;
   }
   async onload() {
@@ -10359,6 +10419,9 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
       color: this.settings.userColor
     };
     this.awareness = new AwarenessManager(initialUser);
+    this.awareness.onLocalChange(() => {
+      this.debouncedBroadcastAwareness();
+    });
     this.wsClient = new KurotsukiWSClient(this.settings, () => ({
       id: initialUser.id,
       name: this.settings.userName,
@@ -10518,6 +10581,9 @@ ${p.split("/").pop()}`);
     if (this.awarenessBroadcastInterval !== null) {
       window.clearInterval(this.awarenessBroadcastInterval);
     }
+    if (this.awarenessDebounceTimer !== null) {
+      window.clearTimeout(this.awarenessDebounceTimer);
+    }
     this.wsClient.disconnect(true);
     this.syncEngine.destroy();
     this.awareness.destroy();
@@ -10554,6 +10620,17 @@ ${p.split("/").pop()}`);
       type: "awareness_update",
       states: [local]
     });
+  }
+  debouncedBroadcastAwareness() {
+    if (this.awarenessDebounceTimer !== null) {
+      window.clearTimeout(this.awarenessDebounceTimer);
+    }
+    this.awarenessDebounceTimer = window.setTimeout(() => {
+      this.awarenessDebounceTimer = null;
+      if (this.wsClient.getStatus() === "connected") {
+        this.broadcastLocalAwareness();
+      }
+    }, 40);
   }
   setupStatusBar() {
     this.statusBarEl = this.addStatusBarItem();

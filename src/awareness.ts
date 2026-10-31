@@ -1,11 +1,13 @@
 import { PeerAwarenessState, RemoteCursor, UserProfile } from './types';
 
 export type AwarenessListener = (peers: PeerAwarenessState[]) => void;
+export type LocalChangeListener = (state: PeerAwarenessState) => void;
 
 export class AwarenessManager {
   private localState: PeerAwarenessState;
   private remotePeers: Map<number, PeerAwarenessState> = new Map();
   private listeners: Set<AwarenessListener> = new Set();
+  private localListeners: Set<LocalChangeListener> = new Set();
   private cleanupInterval: number | null = null;
 
   constructor(user: UserProfile) {
@@ -36,6 +38,7 @@ export class AwarenessManager {
     this.localState.user = { ...this.localState.user, ...user };
     this.localState.lastActive = Date.now();
     this.notify();
+    this.notifyLocal();
   }
 
   public updateActiveFile(path: string | null): void {
@@ -44,6 +47,7 @@ export class AwarenessManager {
       this.localState.cursor = null;
       this.localState.lastActive = Date.now();
       this.notify();
+      this.notifyLocal();
     }
   }
 
@@ -51,6 +55,7 @@ export class AwarenessManager {
     this.localState.cursor = cursor;
     this.localState.lastActive = Date.now();
     this.notify();
+    this.notifyLocal();
   }
 
   public handleRemoteAwareness(states: PeerAwarenessState[]): void {
@@ -95,6 +100,18 @@ export class AwarenessManager {
     return () => this.listeners.delete(listener);
   }
 
+  public onLocalChange(listener: LocalChangeListener): () => void {
+    this.localListeners.add(listener);
+    return () => this.localListeners.delete(listener);
+  }
+
+  private notifyLocal(): void {
+    const local = this.getLocalState();
+    for (const listener of this.localListeners) {
+      listener(local);
+    }
+  }
+
   private pruneStalePeers(): void {
     const now = Date.now();
     let changed = false;
@@ -121,6 +138,7 @@ export class AwarenessManager {
       window.clearInterval(this.cleanupInterval);
     }
     this.listeners.clear();
+    this.localListeners.clear();
     this.remotePeers.clear();
   }
 }

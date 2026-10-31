@@ -131,7 +131,7 @@ export class KurotsukiPeerSidebarView extends ItemView {
       cls: `kurotsuki-peer-sidebar-card ${isSelf ? 'kurotsuki-peer-self' : ''}`,
     });
 
-    // Avatar
+    // Avatar with user color
     const avatar = card.createDiv({ cls: 'kurotsuki-peer-sidebar-avatar' });
     avatar.style.backgroundColor = state.user.color || '#3b82f6';
     avatar.textContent = (state.user.name || '?').charAt(0).toUpperCase();
@@ -139,35 +139,59 @@ export class KurotsukiPeerSidebarView extends ItemView {
     // Info body
     const body = card.createDiv({ cls: 'kurotsuki-peer-sidebar-body' });
     const nameRow = body.createDiv({ cls: 'kurotsuki-peer-name-row' });
-    nameRow.createEl('span', { cls: 'kurotsuki-peer-name', text: state.user.name });
+    nameRow.createEl('strong', { cls: 'kurotsuki-peer-name', text: state.user.name });
 
     if (isSelf) {
       nameRow.createSpan({ cls: 'kurotsuki-badge-self', text: 'You' });
     }
 
+    if (state.user.role) {
+      nameRow.createSpan({
+        cls: `kurotsuki-role-badge kurotsuki-role-${state.user.role}`,
+        text: state.user.role.toUpperCase(),
+      });
+    }
+
     // Active Note Link
     const noteRow = body.createDiv({ cls: 'kurotsuki-peer-note-row' });
+    const currentActivePath = this.app.workspace.getActiveFile()?.path;
+
     if (state.activeFile) {
+      const isSameDoc = currentActivePath === state.activeFile;
+      const fileName = state.activeFile.split('/').pop() || state.activeFile;
+
       const fileLink = noteRow.createEl('a', {
-        cls: 'kurotsuki-note-link',
-        text: `📄 ${state.activeFile}`,
+        cls: `kurotsuki-note-link ${isSameDoc ? 'kurotsuki-note-same' : ''}`,
+        text: `📝 ${fileName}`,
+        attr: { title: `Click to open: ${state.activeFile}` },
       });
+
       fileLink.onclick = async (e) => {
         e.preventDefault();
         if (state.activeFile) {
           await this.app.workspace.openLinkText(state.activeFile, '', false);
         }
       };
+
+      if (isSameDoc) {
+        noteRow.createSpan({ cls: 'kurotsuki-badge-here', text: '🟢 With you' });
+      }
     } else {
-      noteRow.createSpan({ cls: 'kurotsuki-peer-idle', text: 'Idle (no note opened)' });
+      noteRow.createSpan({ cls: 'kurotsuki-peer-idle', text: '💤 Inactive / No note open' });
     }
 
-    // Cursor position if active
+    // Cursor position & text selection details
     if (state.cursor) {
-      body.createDiv({
-        cls: 'kurotsuki-peer-cursor-info',
-        text: `pos: ${state.cursor.head}`,
-      });
+      const cursorRow = body.createDiv({ cls: 'kurotsuki-peer-cursor-info' });
+      const selLen = Math.abs(state.cursor.head - state.cursor.anchor);
+
+      if (selLen > 0) {
+        const from = Math.min(state.cursor.anchor, state.cursor.head);
+        const to = Math.max(state.cursor.anchor, state.cursor.head);
+        cursorRow.innerHTML = `📍 Curseur: <strong>${state.cursor.head}</strong> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || '#3b82f6'};">✂️ ${selLen} car. (${from}→${to})</span>`;
+      } else {
+        cursorRow.innerHTML = `📍 Curseur: <strong>${state.cursor.head}</strong>`;
+      }
     }
   }
 }

@@ -13,8 +13,8 @@ import { AwarenessManager } from './awareness';
 import { PeerAwarenessState } from './types';
 
 export const remoteSyncAnnotation = Annotation.define<boolean>();
-
 export const setReadOnlyEffect = StateEffect.define<boolean>();
+export const awarenessEffect = StateEffect.define<void>();
 
 export const readOnlyField = StateField.define<boolean>({
   create: () => false,
@@ -25,6 +25,18 @@ export const readOnlyField = StateField.define<boolean>({
     return val;
   },
 });
+
+function hexToRgba(hex: string, alpha = 0.25): string {
+  if (!hex || !hex.startsWith('#')) return `rgba(59, 130, 246, ${alpha})`;
+  let c = hex.substring(1);
+  if (c.length === 3) c = c.split('').map((x) => x + x).join('');
+  const num = parseInt(c, 16);
+  if (isNaN(num)) return `rgba(59, 130, 246, ${alpha})`;
+  const r = (num >> 16) & 255;
+  const g = (num >> 8) & 255;
+  const b = num & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 class RemoteCursorWidget extends WidgetType {
   private user: PeerAwarenessState['user'];
@@ -37,13 +49,12 @@ class RemoteCursorWidget extends WidgetType {
   toDOM(): HTMLElement {
     const cursor = document.createElement('span');
     cursor.className = 'cm-kurotsuki-cursor';
-    cursor.style.borderLeft = `2px solid ${this.user.color}`;
-    cursor.style.height = '1.2em';
+    cursor.style.borderLeftColor = this.user.color || '#3b82f6';
 
     const label = document.createElement('span');
     label.className = 'cm-kurotsuki-cursor-label';
-    label.style.backgroundColor = this.user.color;
-    label.textContent = this.user.name;
+    label.style.backgroundColor = this.user.color || '#3b82f6';
+    label.textContent = this.user.name || 'Collaborator';
 
     cursor.appendChild(label);
     return cursor;
@@ -80,7 +91,11 @@ export function createCollabExtension(
         this.decorations = this.buildDecorations(view);
 
         this.unsubscribeAwareness = awareness.subscribe(() => {
-          view.requestMeasure();
+          if (this.view.dom && this.view.dom.isConnected) {
+            this.view.dispatch({
+              effects: [awarenessEffect.of()],
+            });
+          }
         });
 
         this.updateBanner(view);
@@ -180,7 +195,11 @@ export function createCollabExtension(
         this.bindActiveYDoc();
         this.syncReadOnlyState(update.view);
 
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        const hasAwarenessEffect = update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(awarenessEffect))
+        );
+
+        if (update.docChanged || update.viewportChanged || update.selectionSet || hasAwarenessEffect) {
           this.decorations = this.buildDecorations(update.view);
         }
 
@@ -262,7 +281,14 @@ export function createCollabExtension(
         const peers = awareness.getActivePeersForFile(currentPath);
         const docLength = view.state.doc.length;
 
-        const cursorEntries: Array<{ pos: number; peer: PeerAwarenessState; isHead: boolean; range?: { from: number; to: number } }> = [];
+        interface DecoItem {
+          from: number;
+          to: number;
+          isWidget: boolean;
+          deco: Decoration;
+        }
+
+        const items: DecoItem[] = [];
 
         for (const peer of peers) {
           if (!peer.cursor) continue;
@@ -273,40 +299,46 @@ export function createCollabExtension(
           const safeTo = Math.max(0, Math.min(to, docLength));
           const safeHead = Math.max(0, Math.min(peer.cursor.head, docLength));
 
-          if (safeFrom !== safeTo) {
-            cursorEntries.push({
-              pos: safeFrom,
-              peer,
-              isHead: false,
-              range: { from: safeFrom, to: safeTo },
+          // 1. Text Selection Highlight (if range > 0)
+          if (safeFrom < safeTo) {
+            const markDeco = Decoration.mark({
+              class: 'cm-kurotsuki-selection',
+              attributes: {
+                style: `background-color: ${hexToRgba(peer.user.color || '#3b82f6', 0.28)} !important;`,
+              },
+            });
+            items.push({
+              from: safeFrom,
+              to: safeTo,
+              isWidget: false,
+              deco: markDeco,
             });
           }
 
-          cursorEntries.push({
-            pos: safeHead,
-            peer,
-            isHead: true,
+          // 2. Remote Cursor Caret & Name Tag
+          const widgetDeco = Decoration.widget({
+            widget: new RemoteCursorWidget(peer.user),
+            side: 1,
+          });
+          items.push({
+            from: safeHead,
+            to: safeHead,
+            isWidget: true,
+            deco: widgetDeco,
           });
         }
 
-        cursorEntries.sort((a, b) => a.pos - b.pos);
+        // Sort strictly according to CodeMirror 6 RangeSetBuilder requirements:
+        // Increasing from; if equal, marks (isWidget=false) come before point widgets (isWidget=true)
+        items.sort((a, b) => {
+          if (a.from !== b.from) return a.from - b.from;
+          if (!a.isWidget && b.isWidget) return -1;
+          if (a.isWidget && !b.isWidget) return 1;
+          return a.to - b.to;
+        });
 
-        for (const entry of cursorEntries) {
-          if (entry.isHead) {
-            const widget = Decoration.widget({
-              widget: new RemoteCursorWidget(entry.peer.user),
-              side: 1,
-            });
-            builder.add(entry.pos, entry.pos, widget);
-          } else if (entry.range) {
-            const mark = Decoration.mark({
-              class: 'cm-kurotsuki-selection',
-              attributes: {
-                style: `background-color: ${entry.peer.user.color};`,
-              },
-            });
-            builder.add(entry.range.from, entry.range.to, mark);
-          }
+        for (const item of items) {
+          builder.add(item.from, item.to, item.deco);
         }
 
         return builder.finish();

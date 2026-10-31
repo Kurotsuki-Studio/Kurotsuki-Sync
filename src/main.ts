@@ -18,6 +18,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
   awareness!: AwarenessManager;
   private statusBarEl!: HTMLElement;
   private awarenessBroadcastInterval: number | null = null;
+  private awarenessDebounceTimer: number | null = null;
   private lastReadOnlyNoticeTime = 0;
 
   async onload() {
@@ -30,6 +31,9 @@ export default class KurotsukiSyncPlugin extends Plugin {
       color: this.settings.userColor,
     };
     this.awareness = new AwarenessManager(initialUser);
+    this.awareness.onLocalChange(() => {
+      this.debouncedBroadcastAwareness();
+    });
 
     // 2. Initialize WebSocket Client
     this.wsClient = new KurotsukiWSClient(this.settings, () => ({
@@ -227,6 +231,9 @@ export default class KurotsukiSyncPlugin extends Plugin {
     if (this.awarenessBroadcastInterval !== null) {
       window.clearInterval(this.awarenessBroadcastInterval);
     }
+    if (this.awarenessDebounceTimer !== null) {
+      window.clearTimeout(this.awarenessDebounceTimer);
+    }
     this.wsClient.disconnect(true);
     this.syncEngine.destroy();
     this.awareness.destroy();
@@ -269,6 +276,18 @@ export default class KurotsukiSyncPlugin extends Plugin {
       type: 'awareness_update',
       states: [local],
     });
+  }
+
+  private debouncedBroadcastAwareness(): void {
+    if (this.awarenessDebounceTimer !== null) {
+      window.clearTimeout(this.awarenessDebounceTimer);
+    }
+    this.awarenessDebounceTimer = window.setTimeout(() => {
+      this.awarenessDebounceTimer = null;
+      if (this.wsClient.getStatus() === 'connected') {
+        this.broadcastLocalAwareness();
+      }
+    }, 40);
   }
 
   private setupStatusBar(): void {
