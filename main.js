@@ -325,11 +325,11 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             }
             if (d.delete) {
               changes.push({ from: index, to: index + d.delete });
+              index += d.delete;
             }
             if (d.insert) {
               const str = typeof d.insert === "string" ? d.insert : "";
               changes.push({ from: index, to: index, insert: str });
-              index += str.length;
             }
           }
           if (changes.length > 0) {
@@ -362,17 +362,20 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             const yText = this.currentYText;
             const doc2 = yText.doc;
             if (doc2) {
+              let adj = 0;
               update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
                 const insertStr = inserted.toString();
                 const deleteLen = toA - fromA;
+                const pos = fromA + adj;
                 doc2.transact(() => {
                   if (deleteLen > 0) {
-                    yText.delete(fromA, deleteLen);
+                    yText.delete(pos, deleteLen);
                   }
                   if (insertStr.length > 0) {
-                    yText.insert(fromA, insertStr);
+                    yText.insert(pos, insertStr);
                   }
                 }, "cm6");
+                adj += insertStr.length - deleteLen;
               });
             }
           }
@@ -9318,6 +9321,15 @@ var SyncEngine = class {
       this.docs.delete(path);
     }
   }
+  isOpenInEditor(path) {
+    let open = false;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view && leaf.view.file && leaf.view.file.path === path) {
+        open = true;
+      }
+    });
+    return open;
+  }
   async onLocalFileModified(file) {
     if (!this.shouldSync(file.path))
       return;
@@ -9326,8 +9338,7 @@ var SyncEngine = class {
     if (this.isReadOnly()) {
       return;
     }
-    const activeFile = this.app.workspace.getActiveFile();
-    if (activeFile && activeFile.path === file.path) {
+    if (this.isOpenInEditor(file.path)) {
       return;
     }
     if (file.extension === "md" || file.extension === "txt" || file.extension === "canvas") {
@@ -9566,7 +9577,7 @@ var SyncEngine = class {
         }
       } else {
         this.trackSyncedFile(rf.path);
-        if (!rf.isAttachment && !this.isAttachmentPath(rf.path)) {
+        if (!this.isOpenInEditor(rf.path) && !rf.isAttachment && !this.isAttachmentPath(rf.path)) {
           this.wsClient.send({
             type: "doc_request",
             path: rf.path
@@ -9612,8 +9623,10 @@ var SyncEngine = class {
     const doc2 = this.getOrCreateDoc(path);
     applyUpdate(doc2, update, "remote");
     this.trackSyncedFile(path);
-    const content = doc2.getText("content").toString();
-    await this.writeToVaultSafely(path, content);
+    if (!this.isOpenInEditor(path)) {
+      const content = doc2.getText("content").toString();
+      await this.writeToVaultSafely(path, content);
+    }
   }
   async downloadAttachment(relativePath) {
     try {
@@ -9672,8 +9685,7 @@ var SyncEngine = class {
     }
     const timer = window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
-      const activeFile = this.app.workspace.getActiveFile();
-      if (activeFile && activeFile.path === path) {
+      if (this.isOpenInEditor(path)) {
         return;
       }
       const text2 = doc2.getText("content").toString();

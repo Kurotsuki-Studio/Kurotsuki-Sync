@@ -200,7 +200,7 @@ export function createCollabExtension(
         this.yTextObserver = (event: Y.YTextEvent) => {
           if (event.transaction.origin === 'cm6') return;
 
-          // Convert Yjs deltas into CodeMirror transaction
+          // Convert Yjs deltas into CodeMirror transaction accurately
           let index = 0;
           const changes: Array<{ from: number; to: number; insert?: string }> = [];
 
@@ -210,11 +210,11 @@ export function createCollabExtension(
             }
             if (d.delete) {
               changes.push({ from: index, to: index + d.delete });
+              index += d.delete;
             }
             if (d.insert) {
               const str = typeof d.insert === 'string' ? d.insert : '';
               changes.push({ from: index, to: index, insert: str });
-              index += str.length;
             }
           }
 
@@ -255,17 +255,20 @@ export function createCollabExtension(
             const yText = this.currentYText;
             const doc = yText.doc;
             if (doc) {
+              let adj = 0;
               update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
                 const insertStr = inserted.toString();
                 const deleteLen = toA - fromA;
+                const pos = fromA + adj;
                 doc.transact(() => {
                   if (deleteLen > 0) {
-                    yText.delete(fromA, deleteLen);
+                    yText.delete(pos, deleteLen);
                   }
                   if (insertStr.length > 0) {
-                    yText.insert(fromA, insertStr);
+                    yText.insert(pos, insertStr);
                   }
                 }, 'cm6');
+                adj += insertStr.length - deleteLen;
               });
             }
           }

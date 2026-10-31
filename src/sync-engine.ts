@@ -138,6 +138,17 @@ export class SyncEngine {
     }
   }
 
+  public isOpenInEditor(path: string): boolean {
+    let open = false;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      // @ts-ignore
+      if (leaf.view && leaf.view.file && leaf.view.file.path === path) {
+        open = true;
+      }
+    });
+    return open;
+  }
+
   public async onLocalFileModified(file: TFile): Promise<void> {
     if (!this.shouldSync(file.path)) return;
     if (this.isLocked(file.path)) return;
@@ -147,11 +158,10 @@ export class SyncEngine {
       return;
     }
 
-    // IMPORTANT: If this file is currently open in the active editor,
+    // IMPORTANT: If this file is currently open in ANY editor in Obsidian,
     // the CM6 extension is ALREADY tracking every keystroke directly into Yjs!
     // Do NOT read stale disk cache and do NOT overwrite Yjs while user is typing!
-    const activeFile = this.app.workspace.getActiveFile();
-    if (activeFile && activeFile.path === file.path) {
+    if (this.isOpenInEditor(file.path)) {
       return;
     }
 
@@ -417,9 +427,10 @@ export class SyncEngine {
           });
         }
       } else {
-        // Exists locally -> ensure tracked and request CRDT state
+        // Exists locally -> ensure tracked
         this.trackSyncedFile(rf.path);
-        if (!rf.isAttachment && !this.isAttachmentPath(rf.path)) {
+        // Do NOT request doc_request if file is actively open in editor
+        if (!this.isOpenInEditor(rf.path) && !rf.isAttachment && !this.isAttachmentPath(rf.path)) {
           this.wsClient.send({
             type: 'doc_request',
             path: rf.path,
@@ -466,8 +477,10 @@ export class SyncEngine {
     const doc = this.getOrCreateDoc(path);
     Y.applyUpdate(doc, update, 'remote');
     this.trackSyncedFile(path);
-    const content = doc.getText('content').toString();
-    await this.writeToVaultSafely(path, content);
+    if (!this.isOpenInEditor(path)) {
+      const content = doc.getText('content').toString();
+      await this.writeToVaultSafely(path, content);
+    }
   }
 
   private async downloadAttachment(relativePath: string): Promise<void> {
@@ -536,10 +549,8 @@ export class SyncEngine {
     const timer = window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
 
-      // Protect active editor: do NOT overwrite the file on disk while actively open in editor
-      // Writing to an active file causes Obsidian to reload the buffer and resets the cursor to 0
-      const activeFile = this.app.workspace.getActiveFile();
-      if (activeFile && activeFile.path === path) {
+      // Protect active editor: do NOT overwrite the file on disk while open in editor
+      if (this.isOpenInEditor(path)) {
         return;
       }
 
