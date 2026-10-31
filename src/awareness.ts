@@ -54,7 +54,8 @@ export class AwarenessManager {
   public updateCursor(cursor: RemoteCursor | null): void {
     this.localState.cursor = cursor;
     this.localState.lastActive = Date.now();
-    this.notify();
+    // Only notify local WebSocket broadcast (debounced)
+    // Avoid triggering full remote re-renders on local typing
     this.notifyLocal();
   }
 

@@ -1,4 +1,4 @@
-import { Annotation, Extension, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
+import { Annotation, Extension, Range, StateEffect, StateField } from '@codemirror/state';
 import { EditorState } from '@codemirror/state';
 import {
   Decoration,
@@ -86,21 +86,33 @@ export function createCollabExtension(
       private currentYText: Y.Text | null = null;
       private yTextObserver: ((event: Y.YTextEvent) => void) | null = null;
       private isDispatchingRemote = false;
+      private awarenessScheduled = false;
 
       constructor(private view: EditorView) {
         this.decorations = this.buildDecorations(view);
 
         this.unsubscribeAwareness = awareness.subscribe(() => {
           if (this.view.dom && this.view.dom.isConnected) {
-            this.view.dispatch({
-              effects: [awarenessEffect.of()],
-            });
+            this.scheduleAwarenessUpdate();
           }
         });
 
         this.updateBanner(view);
         this.syncReadOnlyState(view);
         this.bindActiveYDoc();
+      }
+
+      private scheduleAwarenessUpdate(): void {
+        if (this.awarenessScheduled) return;
+        this.awarenessScheduled = true;
+        requestAnimationFrame(() => {
+          this.awarenessScheduled = false;
+          if (this.view.dom && this.view.dom.isConnected) {
+            this.view.dispatch({
+              effects: [awarenessEffect.of()],
+            });
+          }
+        });
       }
 
       private syncReadOnlyState(view: EditorView): void {
@@ -274,21 +286,14 @@ export function createCollabExtension(
       }
 
       private buildDecorations(view: EditorView): DecorationSet {
-        const builder = new RangeSetBuilder<Decoration>();
         const currentPath = getActiveFilePath();
-        if (!currentPath) return builder.finish();
+        if (!currentPath) return Decoration.none;
 
         const peers = awareness.getActivePeersForFile(currentPath);
+        if (peers.length === 0) return Decoration.none;
+
         const docLength = view.state.doc.length;
-
-        interface DecoItem {
-          from: number;
-          to: number;
-          isWidget: boolean;
-          deco: Decoration;
-        }
-
-        const items: DecoItem[] = [];
+        const ranges: Array<Range<Decoration>> = [];
 
         for (const peer of peers) {
           if (!peer.cursor) continue;
@@ -307,12 +312,7 @@ export function createCollabExtension(
                 style: `background-color: ${hexToRgba(peer.user.color || '#3b82f6', 0.28)} !important;`,
               },
             });
-            items.push({
-              from: safeFrom,
-              to: safeTo,
-              isWidget: false,
-              deco: markDeco,
-            });
+            ranges.push(markDeco.range(safeFrom, safeTo));
           }
 
           // 2. Remote Cursor Caret & Name Tag
@@ -320,28 +320,11 @@ export function createCollabExtension(
             widget: new RemoteCursorWidget(peer.user),
             side: 1,
           });
-          items.push({
-            from: safeHead,
-            to: safeHead,
-            isWidget: true,
-            deco: widgetDeco,
-          });
+          ranges.push(widgetDeco.range(safeHead));
         }
 
-        // Sort strictly according to CodeMirror 6 RangeSetBuilder requirements:
-        // Increasing from; if equal, marks (isWidget=false) come before point widgets (isWidget=true)
-        items.sort((a, b) => {
-          if (a.from !== b.from) return a.from - b.from;
-          if (!a.isWidget && b.isWidget) return -1;
-          if (a.isWidget && !b.isWidget) return 1;
-          return a.to - b.to;
-        });
-
-        for (const item of items) {
-          builder.add(item.from, item.to, item.deco);
-        }
-
-        return builder.finish();
+        if (ranges.length === 0) return Decoration.none;
+        return Decoration.set(ranges, true);
       }
     },
     {

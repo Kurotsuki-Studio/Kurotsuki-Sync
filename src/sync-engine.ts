@@ -13,6 +13,8 @@ export class SyncEngine {
   private docs: Map<string, Y.Doc> = new Map();
   private remoteUpdateLocks: Map<string, number> = new Map();
   private pendingLocalDebounce: Map<string, number> = new Map();
+  private pendingOutgoingUpdates: Map<string, Uint8Array[]> = new Map();
+  private pendingOutgoingTimers: Map<string, number> = new Map();
   private historyLogs: SyncHistoryEntry[] = [];
   private lastUpdatePerFile: Map<string, { timestamp: number; author?: string }> = new Map();
 
@@ -52,6 +54,54 @@ export class SyncEngine {
     });
   }
 
+  public getDoc(path: string): Y.Doc | undefined {
+    return this.docs.get(path);
+  }
+
+  private queueOutgoingYjsUpdate(path: string, update: Uint8Array): void {
+    let list = this.pendingOutgoingUpdates.get(path);
+    if (!list) {
+      list = [];
+      this.pendingOutgoingUpdates.set(path, list);
+    }
+    list.push(update);
+
+    if (!this.pendingOutgoingTimers.has(path)) {
+      const timer = window.setTimeout(() => {
+        this.flushOutgoingYjsUpdate(path);
+      }, 25);
+      this.pendingOutgoingTimers.set(path, timer);
+    }
+  }
+
+  private flushOutgoingYjsUpdate(path: string): void {
+    const timer = this.pendingOutgoingTimers.get(path);
+    if (timer) {
+      window.clearTimeout(timer);
+      this.pendingOutgoingTimers.delete(path);
+    }
+
+    const updates = this.pendingOutgoingUpdates.get(path);
+    this.pendingOutgoingUpdates.delete(path);
+    if (!updates || updates.length === 0) return;
+
+    const merged = updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
+    const b64 = uint8ArrayToBase64(merged);
+
+    this.recordHistory({
+      type: 'local_update',
+      path,
+      sizeBytes: merged.length,
+      summary: `Sent local CRDT update (${merged.length} bytes)`,
+    });
+
+    this.wsClient.send({
+      type: 'yjs_sync',
+      path,
+      update: b64,
+    });
+  }
+
   public getOrCreateDoc(path: string, initialContent?: string): Y.Doc {
     let doc = this.docs.get(path);
     if (!doc) {
@@ -72,19 +122,7 @@ export class SyncEngine {
           return;
         }
 
-        const b64 = uint8ArrayToBase64(update);
-        this.recordHistory({
-          type: 'local_update',
-          path,
-          sizeBytes: update.length,
-          summary: `Sent local CRDT update (${update.length} bytes)`,
-        });
-
-        this.wsClient.send({
-          type: 'yjs_sync',
-          path,
-          update: b64,
-        });
+        this.queueOutgoingYjsUpdate(path, update);
       });
 
       this.docs.set(path, doc);
@@ -635,6 +673,11 @@ export class SyncEngine {
       window.clearTimeout(timer);
     }
     this.pendingLocalDebounce.clear();
+    for (const timer of this.pendingOutgoingTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.pendingOutgoingTimers.clear();
+    this.pendingOutgoingUpdates.clear();
     for (const doc of this.docs.values()) {
       doc.destroy();
     }

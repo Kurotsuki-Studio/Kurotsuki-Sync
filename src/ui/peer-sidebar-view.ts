@@ -152,6 +152,11 @@ export class KurotsukiPeerSidebarView extends ItemView {
       });
     }
 
+    const isLive = Date.now() - state.lastActive < 8000;
+    if (isLive) {
+      nameRow.createSpan({ cls: 'kurotsuki-peer-live-pill', text: '⚡ Direct' });
+    }
+
     // Active Note Link
     const noteRow = body.createDiv({ cls: 'kurotsuki-peer-note-row' });
     const currentActivePath = this.app.workspace.getActiveFile()?.path;
@@ -163,7 +168,7 @@ export class KurotsukiPeerSidebarView extends ItemView {
       const fileLink = noteRow.createEl('a', {
         cls: `kurotsuki-note-link ${isSameDoc ? 'kurotsuki-note-same' : ''}`,
         text: `📝 ${fileName}`,
-        attr: { title: `Click to open: ${state.activeFile}` },
+        attr: { title: `Cliquer pour ouvrir : ${state.activeFile}` },
       });
 
       fileLink.onclick = async (e) => {
@@ -174,10 +179,10 @@ export class KurotsukiPeerSidebarView extends ItemView {
       };
 
       if (isSameDoc) {
-        noteRow.createSpan({ cls: 'kurotsuki-badge-here', text: '🟢 With you' });
+        noteRow.createSpan({ cls: 'kurotsuki-badge-here', text: '🟢 Avec vous' });
       }
     } else {
-      noteRow.createSpan({ cls: 'kurotsuki-peer-idle', text: '💤 Inactive / No note open' });
+      noteRow.createSpan({ cls: 'kurotsuki-peer-idle', text: '💤 Inactif / Aucun document' });
     }
 
     // Cursor position & text selection details
@@ -185,12 +190,40 @@ export class KurotsukiPeerSidebarView extends ItemView {
       const cursorRow = body.createDiv({ cls: 'kurotsuki-peer-cursor-info' });
       const selLen = Math.abs(state.cursor.head - state.cursor.anchor);
 
+      let lineText = '';
+      let snippetHtml = '';
+
+      if (state.activeFile) {
+        const doc = this.plugin.syncEngine.getDoc(state.activeFile);
+        if (doc) {
+          const content = doc.getText('content').toString();
+          const head = Math.max(0, Math.min(state.cursor.head, content.length));
+          const before = content.substring(0, head);
+          const lines = before.split('\n');
+          const lineNum = lines.length;
+          const colNum = lines[lines.length - 1].length + 1;
+          lineText = `L${lineNum}:C${colNum}`;
+
+          if (selLen > 0) {
+            const from = Math.min(state.cursor.anchor, state.cursor.head);
+            const to = Math.max(state.cursor.anchor, state.cursor.head);
+            const rawSnippet = content.substring(Math.max(0, from), Math.min(content.length, to)).replace(/\s+/g, ' ').trim();
+            if (rawSnippet) {
+              const displaySnippet = rawSnippet.length > 20 ? rawSnippet.substring(0, 20) + '…' : rawSnippet;
+              snippetHtml = `<span class="kurotsuki-cursor-snippet" title="${rawSnippet}">"${displaySnippet}"</span>`;
+            }
+          }
+        }
+      }
+
+      const posLabel = lineText ? `${lineText} (#${state.cursor.head})` : `#${state.cursor.head}`;
+
       if (selLen > 0) {
         const from = Math.min(state.cursor.anchor, state.cursor.head);
         const to = Math.max(state.cursor.anchor, state.cursor.head);
-        cursorRow.innerHTML = `📍 Curseur: <strong>${state.cursor.head}</strong> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || '#3b82f6'};">✂️ ${selLen} car. (${from}→${to})</span>`;
+        cursorRow.innerHTML = `📍 <span class="kurotsuki-cursor-pos">${posLabel}</span> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || '#3b82f6'};">✂️ ${selLen} car. (${from}→${to})</span> ${snippetHtml}`;
       } else {
-        cursorRow.innerHTML = `📍 Curseur: <strong>${state.cursor.head}</strong>`;
+        cursorRow.innerHTML = `📍 <span class="kurotsuki-cursor-pos">${posLabel}</span>`;
       }
     }
   }

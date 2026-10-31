@@ -77,7 +77,6 @@ var AwarenessManager = class {
   updateCursor(cursor) {
     this.localState.cursor = cursor;
     this.localState.lastActive = Date.now();
-    this.notify();
     this.notifyLocal();
   }
   handleRemoteAwareness(states) {
@@ -221,17 +220,29 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         this.currentYText = null;
         this.yTextObserver = null;
         this.isDispatchingRemote = false;
+        this.awarenessScheduled = false;
         this.decorations = this.buildDecorations(view);
         this.unsubscribeAwareness = awareness.subscribe(() => {
+          if (this.view.dom && this.view.dom.isConnected) {
+            this.scheduleAwarenessUpdate();
+          }
+        });
+        this.updateBanner(view);
+        this.syncReadOnlyState(view);
+        this.bindActiveYDoc();
+      }
+      scheduleAwarenessUpdate() {
+        if (this.awarenessScheduled)
+          return;
+        this.awarenessScheduled = true;
+        requestAnimationFrame(() => {
+          this.awarenessScheduled = false;
           if (this.view.dom && this.view.dom.isConnected) {
             this.view.dispatch({
               effects: [awarenessEffect.of()]
             });
           }
         });
-        this.updateBanner(view);
-        this.syncReadOnlyState(view);
-        this.bindActiveYDoc();
       }
       syncReadOnlyState(view) {
         const readOnly = isReadOnly();
@@ -378,13 +389,14 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         }
       }
       buildDecorations(view) {
-        const builder = new import_state.RangeSetBuilder();
         const currentPath = getActiveFilePath();
         if (!currentPath)
-          return builder.finish();
+          return import_view.Decoration.none;
         const peers = awareness.getActivePeersForFile(currentPath);
+        if (peers.length === 0)
+          return import_view.Decoration.none;
         const docLength = view.state.doc.length;
-        const items = [];
+        const ranges = [];
         for (const peer of peers) {
           if (!peer.cursor)
             continue;
@@ -400,37 +412,17 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
                 style: `background-color: ${hexToRgba(peer.user.color || "#3b82f6", 0.28)} !important;`
               }
             });
-            items.push({
-              from: safeFrom,
-              to: safeTo,
-              isWidget: false,
-              deco: markDeco
-            });
+            ranges.push(markDeco.range(safeFrom, safeTo));
           }
           const widgetDeco = import_view.Decoration.widget({
             widget: new RemoteCursorWidget(peer.user),
             side: 1
           });
-          items.push({
-            from: safeHead,
-            to: safeHead,
-            isWidget: true,
-            deco: widgetDeco
-          });
+          ranges.push(widgetDeco.range(safeHead));
         }
-        items.sort((a, b) => {
-          if (a.from !== b.from)
-            return a.from - b.from;
-          if (!a.isWidget && b.isWidget)
-            return -1;
-          if (a.isWidget && !b.isWidget)
-            return 1;
-          return a.to - b.to;
-        });
-        for (const item of items) {
-          builder.add(item.from, item.to, item.deco);
-        }
-        return builder.finish();
+        if (ranges.length === 0)
+          return import_view.Decoration.none;
+        return import_view.Decoration.set(ranges, true);
       }
     },
     {
@@ -9195,6 +9187,8 @@ var SyncEngine = class {
     this.docs = /* @__PURE__ */ new Map();
     this.remoteUpdateLocks = /* @__PURE__ */ new Map();
     this.pendingLocalDebounce = /* @__PURE__ */ new Map();
+    this.pendingOutgoingUpdates = /* @__PURE__ */ new Map();
+    this.pendingOutgoingTimers = /* @__PURE__ */ new Map();
     this.historyLogs = [];
     this.lastUpdatePerFile = /* @__PURE__ */ new Map();
     this.app = app;
@@ -9225,6 +9219,47 @@ var SyncEngine = class {
       return normalized === cleanFolder || normalized.startsWith(cleanFolder + "/");
     });
   }
+  getDoc(path) {
+    return this.docs.get(path);
+  }
+  queueOutgoingYjsUpdate(path, update) {
+    let list = this.pendingOutgoingUpdates.get(path);
+    if (!list) {
+      list = [];
+      this.pendingOutgoingUpdates.set(path, list);
+    }
+    list.push(update);
+    if (!this.pendingOutgoingTimers.has(path)) {
+      const timer = window.setTimeout(() => {
+        this.flushOutgoingYjsUpdate(path);
+      }, 25);
+      this.pendingOutgoingTimers.set(path, timer);
+    }
+  }
+  flushOutgoingYjsUpdate(path) {
+    const timer = this.pendingOutgoingTimers.get(path);
+    if (timer) {
+      window.clearTimeout(timer);
+      this.pendingOutgoingTimers.delete(path);
+    }
+    const updates = this.pendingOutgoingUpdates.get(path);
+    this.pendingOutgoingUpdates.delete(path);
+    if (!updates || updates.length === 0)
+      return;
+    const merged = updates.length === 1 ? updates[0] : mergeUpdates(updates);
+    const b64 = uint8ArrayToBase64(merged);
+    this.recordHistory({
+      type: "local_update",
+      path,
+      sizeBytes: merged.length,
+      summary: `Sent local CRDT update (${merged.length} bytes)`
+    });
+    this.wsClient.send({
+      type: "yjs_sync",
+      path,
+      update: b64
+    });
+  }
   getOrCreateDoc(path, initialContent) {
     let doc2 = this.docs.get(path);
     if (!doc2) {
@@ -9240,18 +9275,7 @@ var SyncEngine = class {
           console.warn(`[Kurotsuki] Sync blocked: Vault is in read-only mode for ${path}`);
           return;
         }
-        const b64 = uint8ArrayToBase64(update);
-        this.recordHistory({
-          type: "local_update",
-          path,
-          sizeBytes: update.length,
-          summary: `Sent local CRDT update (${update.length} bytes)`
-        });
-        this.wsClient.send({
-          type: "yjs_sync",
-          path,
-          update: b64
-        });
+        this.queueOutgoingYjsUpdate(path, update);
       });
       this.docs.set(path, doc2);
     }
@@ -9743,6 +9767,11 @@ var SyncEngine = class {
       window.clearTimeout(timer);
     }
     this.pendingLocalDebounce.clear();
+    for (const timer of this.pendingOutgoingTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.pendingOutgoingTimers.clear();
+    this.pendingOutgoingUpdates.clear();
     for (const doc2 of this.docs.values()) {
       doc2.destroy();
     }
@@ -9965,6 +9994,10 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
         text: state.user.role.toUpperCase()
       });
     }
+    const isLive = Date.now() - state.lastActive < 8e3;
+    if (isLive) {
+      nameRow.createSpan({ cls: "kurotsuki-peer-live-pill", text: "\u26A1 Direct" });
+    }
     const noteRow = body.createDiv({ cls: "kurotsuki-peer-note-row" });
     const currentActivePath = this.app.workspace.getActiveFile()?.path;
     if (state.activeFile) {
@@ -9973,7 +10006,7 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
       const fileLink = noteRow.createEl("a", {
         cls: `kurotsuki-note-link ${isSameDoc ? "kurotsuki-note-same" : ""}`,
         text: `\u{1F4DD} ${fileName}`,
-        attr: { title: `Click to open: ${state.activeFile}` }
+        attr: { title: `Cliquer pour ouvrir : ${state.activeFile}` }
       });
       fileLink.onclick = async (e) => {
         e.preventDefault();
@@ -9982,20 +10015,44 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
         }
       };
       if (isSameDoc) {
-        noteRow.createSpan({ cls: "kurotsuki-badge-here", text: "\u{1F7E2} With you" });
+        noteRow.createSpan({ cls: "kurotsuki-badge-here", text: "\u{1F7E2} Avec vous" });
       }
     } else {
-      noteRow.createSpan({ cls: "kurotsuki-peer-idle", text: "\u{1F4A4} Inactive / No note open" });
+      noteRow.createSpan({ cls: "kurotsuki-peer-idle", text: "\u{1F4A4} Inactif / Aucun document" });
     }
     if (state.cursor) {
       const cursorRow = body.createDiv({ cls: "kurotsuki-peer-cursor-info" });
       const selLen = Math.abs(state.cursor.head - state.cursor.anchor);
+      let lineText = "";
+      let snippetHtml = "";
+      if (state.activeFile) {
+        const doc2 = this.plugin.syncEngine.getDoc(state.activeFile);
+        if (doc2) {
+          const content = doc2.getText("content").toString();
+          const head = Math.max(0, Math.min(state.cursor.head, content.length));
+          const before = content.substring(0, head);
+          const lines = before.split("\n");
+          const lineNum = lines.length;
+          const colNum = lines[lines.length - 1].length + 1;
+          lineText = `L${lineNum}:C${colNum}`;
+          if (selLen > 0) {
+            const from2 = Math.min(state.cursor.anchor, state.cursor.head);
+            const to = Math.max(state.cursor.anchor, state.cursor.head);
+            const rawSnippet = content.substring(Math.max(0, from2), Math.min(content.length, to)).replace(/\s+/g, " ").trim();
+            if (rawSnippet) {
+              const displaySnippet = rawSnippet.length > 20 ? rawSnippet.substring(0, 20) + "\u2026" : rawSnippet;
+              snippetHtml = `<span class="kurotsuki-cursor-snippet" title="${rawSnippet}">"${displaySnippet}"</span>`;
+            }
+          }
+        }
+      }
+      const posLabel = lineText ? `${lineText} (#${state.cursor.head})` : `#${state.cursor.head}`;
       if (selLen > 0) {
         const from2 = Math.min(state.cursor.anchor, state.cursor.head);
         const to = Math.max(state.cursor.anchor, state.cursor.head);
-        cursorRow.innerHTML = `\u{1F4CD} Curseur: <strong>${state.cursor.head}</strong> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || "#3b82f6"};">\u2702\uFE0F ${selLen} car. (${from2}\u2192${to})</span>`;
+        cursorRow.innerHTML = `\u{1F4CD} <span class="kurotsuki-cursor-pos">${posLabel}</span> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || "#3b82f6"};">\u2702\uFE0F ${selLen} car. (${from2}\u2192${to})</span> ${snippetHtml}`;
       } else {
-        cursorRow.innerHTML = `\u{1F4CD} Curseur: <strong>${state.cursor.head}</strong>`;
+        cursorRow.innerHTML = `\u{1F4CD} <span class="kurotsuki-cursor-pos">${posLabel}</span>`;
       }
     }
   }
