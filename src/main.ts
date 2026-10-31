@@ -50,7 +50,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
     this.registerEditorExtension(
       createCollabExtension(
         this.awareness,
-        () => this.app.workspace.getActiveFile()?.path || null,
+        () => this.getRobustActiveFilePath(),
         (path: string) => this.syncEngine.getOrCreateDoc(path),
         () => this.syncEngine.isReadOnly(),
         () => this.notifyReadOnlyAttempt()
@@ -353,6 +353,24 @@ export default class KurotsukiSyncPlugin extends Plugin {
         }
       }
     });
+  }
+
+  public getRobustActiveFilePath(): string | null {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile) return activeFile.path;
+
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView && activeView.file) return activeView.file.path;
+
+    let path: string | null = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      // @ts-ignore
+      if (!path && leaf.view && leaf.view.file && leaf.view.file.path) {
+        // @ts-ignore
+        path = leaf.view.file.path;
+      }
+    });
+    return path;
   }
 
   async loadSettings() {

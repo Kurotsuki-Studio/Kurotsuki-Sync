@@ -16,21 +16,31 @@
 
 .cm-kurotsuki-cursor-label {
   position: absolute;
-  top: -1.4em;
+  top: -1.3em;
   left: -2px;
-  font-size: 0.72rem;
-  line-height: 1.2;
+  font-size: 0.68rem;
+  line-height: 1.1;
   font-weight: 600;
   color: #ffffff;
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 3px;
   white-space: nowrap;
   pointer-events: none;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  opacity: 0.95;
-  transition: opacity 0.2s ease-in-out;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  opacity: 0.88;
+  transition: opacity 0.3s ease-in-out;
   user-select: none;
   z-index: 101;
+}
+
+.is-mobile .cm-kurotsuki-cursor-label,
+@media (max-width: 768px) {
+  .cm-kurotsuki-cursor-label {
+    top: -1.1em;
+    font-size: 0.58rem;
+    padding: 0 3px;
+    opacity: 0.75;
+  }
 }
 
 .cm-kurotsuki-selection {

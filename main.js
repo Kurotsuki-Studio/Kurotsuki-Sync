@@ -256,7 +256,12 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         this.awarenessScheduled = true;
         requestAnimationFrame(() => {
           this.awarenessScheduled = false;
+          if (this.view.composing) {
+            setTimeout(() => this.scheduleAwarenessUpdate(), 80);
+            return;
+          }
           if (this.view.dom && this.view.dom.isConnected) {
+            this.decorations = this.buildDecorations(this.view);
             this.view.dispatch({
               effects: [awarenessEffect.of()]
             });
@@ -277,17 +282,15 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
       }
       bindActiveYDoc() {
         const path = getActiveFilePath();
+        if (!path) {
+          return;
+        }
         if (path === this.boundPath && this.currentYText)
           return;
         if (this.currentYText && this.yTextObserver) {
           this.currentYText.unobserve(this.yTextObserver);
         }
         this.boundPath = path;
-        if (!path) {
-          this.currentYText = null;
-          this.yTextObserver = null;
-          return;
-        }
         const doc2 = getYDocForPath(path);
         if (!doc2)
           return;
@@ -362,21 +365,21 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             const yText = this.currentYText;
             const doc2 = yText.doc;
             if (doc2) {
-              let adj = 0;
-              update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                const insertStr = inserted.toString();
-                const deleteLen = toA - fromA;
-                const pos = fromA + adj;
-                doc2.transact(() => {
+              doc2.transact(() => {
+                let adj = 0;
+                update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+                  const insertStr = inserted.toString();
+                  const deleteLen = toA - fromA;
+                  const pos = fromA + adj;
                   if (deleteLen > 0) {
                     yText.delete(pos, deleteLen);
                   }
                   if (insertStr.length > 0) {
                     yText.insert(pos, insertStr);
                   }
-                }, "cm6");
-                adj += insertStr.length - deleteLen;
-              });
+                  adj += insertStr.length - deleteLen;
+                });
+              }, "cm6");
             }
           }
         }
@@ -10573,7 +10576,7 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
     this.registerEditorExtension(
       createCollabExtension(
         this.awareness,
-        () => this.app.workspace.getActiveFile()?.path || null,
+        () => this.getRobustActiveFilePath(),
         (path) => this.syncEngine.getOrCreateDoc(path),
         () => this.syncEngine.isReadOnly(),
         () => this.notifyReadOnlyAttempt()
@@ -10828,6 +10831,21 @@ ${p.split("/").pop()}`);
         }
       }
     });
+  }
+  getRobustActiveFilePath() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile)
+      return activeFile.path;
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+    if (activeView && activeView.file)
+      return activeView.file.path;
+    let path = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (!path && leaf.view && leaf.view.file && leaf.view.file.path) {
+        path = leaf.view.file.path;
+      }
+    });
+    return path;
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());

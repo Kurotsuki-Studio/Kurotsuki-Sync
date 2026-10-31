@@ -129,7 +129,13 @@ export function createCollabExtension(
         this.awarenessScheduled = true;
         requestAnimationFrame(() => {
           this.awarenessScheduled = false;
+          // Protect mobile virtual keyboard from IME freeze: do not dispatch during active composition
+          if (this.view.composing) {
+            setTimeout(() => this.scheduleAwarenessUpdate(), 80);
+            return;
+          }
           if (this.view.dom && this.view.dom.isConnected) {
+            this.decorations = this.buildDecorations(this.view);
             this.view.dispatch({
               effects: [awarenessEffect.of()],
             });
@@ -152,6 +158,11 @@ export function createCollabExtension(
 
       private bindActiveYDoc(): void {
         const path = getActiveFilePath();
+        if (!path) {
+          // On mobile, keyboard popup or focus shifts may temporarily cause getActiveFilePath() to return null.
+          // Keep current binding intact so user input is never lost or unbound!
+          return;
+        }
         if (path === this.boundPath && this.currentYText) return;
 
         // Unbind previous
@@ -160,11 +171,6 @@ export function createCollabExtension(
         }
 
         this.boundPath = path;
-        if (!path) {
-          this.currentYText = null;
-          this.yTextObserver = null;
-          return;
-        }
 
         const doc = getYDocForPath(path);
         if (!doc) return;
@@ -255,21 +261,21 @@ export function createCollabExtension(
             const yText = this.currentYText;
             const doc = yText.doc;
             if (doc) {
-              let adj = 0;
-              update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                const insertStr = inserted.toString();
-                const deleteLen = toA - fromA;
-                const pos = fromA + adj;
-                doc.transact(() => {
+              doc.transact(() => {
+                let adj = 0;
+                update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+                  const insertStr = inserted.toString();
+                  const deleteLen = toA - fromA;
+                  const pos = fromA + adj;
                   if (deleteLen > 0) {
                     yText.delete(pos, deleteLen);
                   }
                   if (insertStr.length > 0) {
                     yText.insert(pos, insertStr);
                   }
-                }, 'cm6');
-                adj += insertStr.length - deleteLen;
-              });
+                  adj += insertStr.length - deleteLen;
+                });
+              }, 'cm6');
             }
           }
         }
