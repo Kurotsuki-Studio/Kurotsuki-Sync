@@ -129,11 +129,6 @@ export function createCollabExtension(
         this.awarenessScheduled = true;
         requestAnimationFrame(() => {
           this.awarenessScheduled = false;
-          // Protect mobile virtual keyboard: do not dispatch awareness during composition or while typing focused on mobile
-          if (this.view.composing || (document.body.classList.contains('is-mobile') && this.view.hasFocus)) {
-            setTimeout(() => this.scheduleAwarenessUpdate(), 250);
-            return;
-          }
           if (this.view.dom && this.view.dom.isConnected) {
             this.decorations = this.buildDecorations(this.view);
             this.view.dispatch({
@@ -159,13 +154,10 @@ export function createCollabExtension(
       private bindActiveYDoc(): void {
         const path = getActiveFilePath(this.view);
         if (!path) {
-          // On mobile, keyboard popup or focus shifts may temporarily cause getActiveFilePath() to return null.
-          // Keep current binding intact so user input is never lost or unbound!
           return;
         }
 
-        // Keep awareness synchronized with the active note
-        if (awareness.getLocalState().activeFile !== path) {
+        if (this.view.hasFocus && awareness.getLocalState().activeFile !== path) {
           awareness.updateActiveFile(path);
         }
 
@@ -189,7 +181,7 @@ export function createCollabExtension(
         if (yText.length === 0 && localText.length > 0) {
           doc.transact(() => {
             yText.insert(0, localText);
-          }, 'cm6-init');
+          }, 'internal');
         } else if (yText.length > 0 && yText.toString() !== localText) {
           // If Yjs already has text from server/peers, sync editor to Yjs content with surgical diff & preserved cursor
           const yString = yText.toString();
@@ -210,7 +202,7 @@ export function createCollabExtension(
 
         // Listen for inbound Yjs changes (from remote peers via WebSocket)
         this.yTextObserver = (event: Y.YTextEvent) => {
-          if (event.transaction.origin === 'cm6') return;
+          if (event.transaction.origin === 'cm6' || event.transaction.origin === 'internal') return;
 
           // Convert Yjs deltas into CodeMirror transaction accurately
           let index = 0;
@@ -286,17 +278,24 @@ export function createCollabExtension(
           }
         }
 
-        // Send local cursor to awareness
-        if (update.selectionSet) {
-          const path = getActiveFilePath(update.view);
-          if (path && awareness.getLocalState().activeFile !== path) {
-            awareness.updateActiveFile(path);
-          }
+        // Send local cursor to awareness when focused
+        if (update.selectionSet && update.view.hasFocus) {
           const main = update.state.selection.main;
-          awareness.updateCursor({
-            anchor: main.anchor,
-            head: main.head,
-          });
+          if (
+            typeof main.anchor === 'number' &&
+            typeof main.head === 'number' &&
+            !isNaN(main.anchor) &&
+            !isNaN(main.head)
+          ) {
+            const path = getActiveFilePath(update.view);
+            if (path && awareness.getLocalState().activeFile !== path) {
+              awareness.updateActiveFile(path);
+            }
+            awareness.updateCursor({
+              anchor: main.anchor,
+              head: main.head,
+            });
+          }
         }
 
         this.updateBanner(update.view);
@@ -349,6 +348,14 @@ export function createCollabExtension(
 
         for (const peer of peers) {
           if (!peer.cursor) continue;
+          if (
+            typeof peer.cursor.anchor !== 'number' ||
+            typeof peer.cursor.head !== 'number' ||
+            isNaN(peer.cursor.anchor) ||
+            isNaN(peer.cursor.head)
+          ) {
+            continue;
+          }
           const from = Math.min(peer.cursor.anchor, peer.cursor.head);
           const to = Math.max(peer.cursor.anchor, peer.cursor.head);
 

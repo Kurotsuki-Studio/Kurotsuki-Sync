@@ -105,16 +105,38 @@ export default class KurotsukiSyncPlugin extends Plugin {
 
     // 9. Track Active Workspace Leaf for Awareness & Safe Disk Flush
     let previousActivePath: string | null = null;
+
+    const handleActiveFileChange = async (fileOrLeafPath: string | null) => {
+      if (previousActivePath && previousActivePath !== fileOrLeafPath) {
+        await this.syncEngine.flushDocToDisk(previousActivePath);
+      }
+      previousActivePath = fileOrLeafPath;
+      if (this.awareness.getLocalState().activeFile !== fileOrLeafPath) {
+        this.awareness.updateActiveFile(fileOrLeafPath);
+        this.broadcastLocalAwareness();
+      }
+    };
+
     this.registerEvent(
       this.app.workspace.on('file-open', async (file) => {
-        if (previousActivePath && (!file || file.path !== previousActivePath)) {
-          await this.syncEngine.flushDocToDisk(previousActivePath);
-        }
-        previousActivePath = file ? file.path : null;
-        this.awareness.updateActiveFile(file ? file.path : null);
-        this.broadcastLocalAwareness();
+        await handleActiveFileChange(file ? file.path : null);
       })
     );
+
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', async (leaf) => {
+        if (leaf && leaf.view instanceof MarkdownView && leaf.view.file) {
+          await handleActiveFileChange(leaf.view.file.path);
+        }
+      })
+    );
+
+    this.app.workspace.onLayoutReady(async () => {
+      const activeFile = this.app.workspace.getActiveFile();
+      if (activeFile) {
+        await handleActiveFileChange(activeFile.path);
+      }
+    });
 
     // 10. Handle Inbound Awareness Updates & Server Events
     this.wsClient.onMessage((msg: WSMessage) => {
@@ -135,18 +157,13 @@ export default class KurotsukiSyncPlugin extends Plugin {
     // Periodic Awareness broadcast (every 3 seconds)
     this.awarenessBroadcastInterval = window.setInterval(() => {
       if (this.wsClient.getStatus() === 'connected') {
+        const active = this.getRobustActiveFilePath();
+        if (active && this.awareness.getLocalState().activeFile !== active) {
+          this.awareness.updateActiveFile(active);
+        }
         this.broadcastLocalAwareness();
       }
     }, 3000);
-
-    // Initial Active File Resolution on startup / mobile layout ready
-    this.app.workspace.onLayoutReady(() => {
-      const initialFile = this.getRobustActiveFilePath();
-      if (initialFile) {
-        this.awareness.updateActiveFile(initialFile);
-        this.broadcastLocalAwareness();
-      }
-    });
 
     // 11. Register Commands
     this.addCommand({
@@ -339,6 +356,11 @@ export default class KurotsukiSyncPlugin extends Plugin {
     this.wsClient.onStatusChange((status) => {
       updateBar();
       if (status === 'connected') {
+        const active = this.getRobustActiveFilePath();
+        if (active) {
+          this.awareness.updateActiveFile(active);
+        }
+        this.broadcastLocalAwareness();
         this.syncEngine.reconcileVault();
       }
     });
@@ -370,12 +392,17 @@ export default class KurotsukiSyncPlugin extends Plugin {
       let foundPath: string | null = null;
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (!foundPath && leaf.view instanceof MarkdownView && leaf.view.file) {
-          if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) {
+          if (
+            (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) ||
+            (leaf.view.containerEl && leaf.view.containerEl.contains(view.dom))
+          ) {
             foundPath = leaf.view.file.path;
           }
         }
       });
       if (foundPath) return foundPath;
+      // If a specific view was given but doesn't belong to any open markdown leaf, do not bind to active file
+      return null;
     }
     return this.getRobustActiveFilePath();
   }

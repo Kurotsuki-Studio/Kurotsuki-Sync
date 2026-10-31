@@ -256,10 +256,6 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         this.awarenessScheduled = true;
         requestAnimationFrame(() => {
           this.awarenessScheduled = false;
-          if (this.view.composing || document.body.classList.contains("is-mobile") && this.view.hasFocus) {
-            setTimeout(() => this.scheduleAwarenessUpdate(), 250);
-            return;
-          }
           if (this.view.dom && this.view.dom.isConnected) {
             this.decorations = this.buildDecorations(this.view);
             this.view.dispatch({
@@ -285,7 +281,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (!path) {
           return;
         }
-        if (awareness.getLocalState().activeFile !== path) {
+        if (this.view.hasFocus && awareness.getLocalState().activeFile !== path) {
           awareness.updateActiveFile(path);
         }
         if (path === this.boundPath && this.currentYText)
@@ -303,7 +299,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (yText.length === 0 && localText.length > 0) {
           doc2.transact(() => {
             yText.insert(0, localText);
-          }, "cm6-init");
+          }, "internal");
         } else if (yText.length > 0 && yText.toString() !== localText) {
           const yString = yText.toString();
           const changes = computeTextChanges(localText, yString);
@@ -321,7 +317,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           }
         }
         this.yTextObserver = (event) => {
-          if (event.transaction.origin === "cm6")
+          if (event.transaction.origin === "cm6" || event.transaction.origin === "internal")
             return;
           let index = 0;
           const changes = [];
@@ -386,16 +382,18 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             }
           }
         }
-        if (update.selectionSet) {
-          const path = getActiveFilePath(update.view);
-          if (path && awareness.getLocalState().activeFile !== path) {
-            awareness.updateActiveFile(path);
-          }
+        if (update.selectionSet && update.view.hasFocus) {
           const main = update.state.selection.main;
-          awareness.updateCursor({
-            anchor: main.anchor,
-            head: main.head
-          });
+          if (typeof main.anchor === "number" && typeof main.head === "number" && !isNaN(main.anchor) && !isNaN(main.head)) {
+            const path = getActiveFilePath(update.view);
+            if (path && awareness.getLocalState().activeFile !== path) {
+              awareness.updateActiveFile(path);
+            }
+            awareness.updateCursor({
+              anchor: main.anchor,
+              head: main.head
+            });
+          }
         }
         this.updateBanner(update.view);
       }
@@ -443,6 +441,9 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         for (const peer of peers) {
           if (!peer.cursor)
             continue;
+          if (typeof peer.cursor.anchor !== "number" || typeof peer.cursor.head !== "number" || isNaN(peer.cursor.anchor) || isNaN(peer.cursor.head)) {
+            continue;
+          }
           const from2 = Math.min(peer.cursor.anchor, peer.cursor.head);
           const to = Math.max(peer.cursor.anchor, peer.cursor.head);
           const safeFrom = Math.max(0, Math.min(from2, docLength));
@@ -10657,16 +10658,34 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
       })
     );
     let previousActivePath = null;
+    const handleActiveFileChange = async (fileOrLeafPath) => {
+      if (previousActivePath && previousActivePath !== fileOrLeafPath) {
+        await this.syncEngine.flushDocToDisk(previousActivePath);
+      }
+      previousActivePath = fileOrLeafPath;
+      if (this.awareness.getLocalState().activeFile !== fileOrLeafPath) {
+        this.awareness.updateActiveFile(fileOrLeafPath);
+        this.broadcastLocalAwareness();
+      }
+    };
     this.registerEvent(
       this.app.workspace.on("file-open", async (file) => {
-        if (previousActivePath && (!file || file.path !== previousActivePath)) {
-          await this.syncEngine.flushDocToDisk(previousActivePath);
-        }
-        previousActivePath = file ? file.path : null;
-        this.awareness.updateActiveFile(file ? file.path : null);
-        this.broadcastLocalAwareness();
+        await handleActiveFileChange(file ? file.path : null);
       })
     );
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", async (leaf) => {
+        if (leaf && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
+          await handleActiveFileChange(leaf.view.file.path);
+        }
+      })
+    );
+    this.app.workspace.onLayoutReady(async () => {
+      const activeFile = this.app.workspace.getActiveFile();
+      if (activeFile) {
+        await handleActiveFileChange(activeFile.path);
+      }
+    });
     this.wsClient.onMessage((msg) => {
       if (msg.type === "awareness_update") {
         this.awareness.handleRemoteAwareness(msg.states);
@@ -10682,16 +10701,13 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
     });
     this.awarenessBroadcastInterval = window.setInterval(() => {
       if (this.wsClient.getStatus() === "connected") {
+        const active = this.getRobustActiveFilePath();
+        if (active && this.awareness.getLocalState().activeFile !== active) {
+          this.awareness.updateActiveFile(active);
+        }
         this.broadcastLocalAwareness();
       }
     }, 3e3);
-    this.app.workspace.onLayoutReady(() => {
-      const initialFile = this.getRobustActiveFilePath();
-      if (initialFile) {
-        this.awareness.updateActiveFile(initialFile);
-        this.broadcastLocalAwareness();
-      }
-    });
     this.addCommand({
       id: "kurotsuki-status",
       name: "Open Sync Dashboard & Collaborators",
@@ -10858,6 +10874,11 @@ ${p.split("/").pop()}`);
     this.wsClient.onStatusChange((status) => {
       updateBar();
       if (status === "connected") {
+        const active = this.getRobustActiveFilePath();
+        if (active) {
+          this.awareness.updateActiveFile(active);
+        }
+        this.broadcastLocalAwareness();
         this.syncEngine.reconcileVault();
       }
     });
@@ -10885,13 +10906,14 @@ ${p.split("/").pop()}`);
       let foundPath = null;
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
-          if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) {
+          if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom) || leaf.view.containerEl && leaf.view.containerEl.contains(view.dom)) {
             foundPath = leaf.view.file.path;
           }
         }
       });
       if (foundPath)
         return foundPath;
+      return null;
     }
     return this.getRobustActiveFilePath();
   }
