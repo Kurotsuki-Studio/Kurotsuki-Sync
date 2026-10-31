@@ -9429,30 +9429,19 @@ var SyncEngine = class {
   }
   async handleFileListResponse(remoteFiles) {
     const remotePaths = new Set(remoteFiles.map((f) => f.path));
-    const synced = this.getSyncedFilesMap();
     for (const rf of remoteFiles) {
       if (!this.shouldSync(rf.path))
         continue;
       const localFile = this.app.vault.getAbstractFileByPath(rf.path);
       if (!localFile) {
-        if (synced[rf.path] && !this.isReadOnly()) {
-          this.untrackSyncedFile(rf.path);
-          this.wsClient.send({
-            type: "file_event",
-            action: "delete",
-            path: rf.path,
-            mtime: Date.now()
-          });
+        this.trackSyncedFile(rf.path);
+        if (rf.isAttachment || this.isAttachmentPath(rf.path)) {
+          await this.downloadAttachment(rf.path);
         } else {
-          this.trackSyncedFile(rf.path);
-          if (rf.isAttachment || this.isAttachmentPath(rf.path)) {
-            await this.downloadAttachment(rf.path);
-          } else {
-            this.wsClient.send({
-              type: "doc_request",
-              path: rf.path
-            });
-          }
+          this.wsClient.send({
+            type: "doc_request",
+            path: rf.path
+          });
         }
       } else {
         this.trackSyncedFile(rf.path);
@@ -9470,32 +9459,26 @@ var SyncEngine = class {
         continue;
       if (!remotePaths.has(file.path)) {
         if (!this.isReadOnly()) {
-          if (synced[file.path]) {
-            this.untrackSyncedFile(file.path);
-            this.lockPath(file.path, 2e3);
-            await this.app.vault.delete(file);
-          } else {
-            this.trackSyncedFile(file.path);
-            if (this.isAttachmentPath(file.path)) {
-              if (this.settings.syncAttachments) {
-                await this.syncAttachment(file);
-              }
-            } else {
-              const content = await this.app.vault.read(file);
-              const doc2 = this.getOrCreateDoc(file.path, content);
-              const state = encodeStateAsUpdate(doc2);
-              this.wsClient.send({
-                type: "file_event",
-                action: "create",
-                path: file.path,
-                mtime: file.stat.mtime
-              });
-              this.wsClient.send({
-                type: "yjs_sync",
-                path: file.path,
-                update: uint8ArrayToBase64(state)
-              });
+          this.trackSyncedFile(file.path);
+          if (this.isAttachmentPath(file.path)) {
+            if (this.settings.syncAttachments) {
+              await this.syncAttachment(file);
             }
+          } else {
+            const content = await this.app.vault.read(file);
+            const doc2 = this.getOrCreateDoc(file.path, content);
+            const state = encodeStateAsUpdate(doc2);
+            this.wsClient.send({
+              type: "file_event",
+              action: "create",
+              path: file.path,
+              mtime: file.stat.mtime
+            });
+            this.wsClient.send({
+              type: "yjs_sync",
+              path: file.path,
+              update: uint8ArrayToBase64(state)
+            });
           }
         }
       }

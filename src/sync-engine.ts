@@ -329,38 +329,25 @@ export class SyncEngine {
 
   public async handleFileListResponse(remoteFiles: Array<{ path: string; mtime: number; isAttachment?: boolean }>): Promise<void> {
     const remotePaths = new Set(remoteFiles.map((f) => f.path));
-    const synced = this.getSyncedFilesMap();
 
-    // 1. Process all remote files from server
+    // 1. Process all remote files from server: download anything we don't have
     for (const rf of remoteFiles) {
       if (!this.shouldSync(rf.path)) continue;
       const localFile = this.app.vault.getAbstractFileByPath(rf.path);
 
       if (!localFile) {
-        // Missing on local disk
-        if (synced[rf.path] && !this.isReadOnly()) {
-          // File was previously synced, but is gone locally -> deleted in Explorer while offline!
-          this.untrackSyncedFile(rf.path);
-          this.wsClient.send({
-            type: 'file_event',
-            action: 'delete',
-            path: rf.path,
-            mtime: Date.now(),
-          });
+        // Missing on local disk -> fetch and create locally
+        this.trackSyncedFile(rf.path);
+        if (rf.isAttachment || this.isAttachmentPath(rf.path)) {
+          await this.downloadAttachment(rf.path);
         } else {
-          // Created on server by collaborator! Fetch & create locally
-          this.trackSyncedFile(rf.path);
-          if (rf.isAttachment || this.isAttachmentPath(rf.path)) {
-            await this.downloadAttachment(rf.path);
-          } else {
-            this.wsClient.send({
-              type: 'doc_request',
-              path: rf.path,
-            });
-          }
+          this.wsClient.send({
+            type: 'doc_request',
+            path: rf.path,
+          });
         }
       } else {
-        // Exists locally -> ensure tracked and synced
+        // Exists locally -> ensure tracked and request CRDT state
         this.trackSyncedFile(rf.path);
         if (!rf.isAttachment && !this.isAttachmentPath(rf.path)) {
           this.wsClient.send({
@@ -371,40 +358,32 @@ export class SyncEngine {
       }
     }
 
-    // 2. Check local files to see if any new files were added locally or need pushing
+    // 2. Check local files: if server doesn't have it, upload/push it to server! (NEVER delete local files)
     const localFiles = this.app.vault.getFiles();
     for (const file of localFiles) {
       if (!this.shouldSync(file.path)) continue;
       if (!remotePaths.has(file.path)) {
         if (!this.isReadOnly()) {
-          if (synced[file.path]) {
-            // Was tracked, but no longer exists on server -> remote deletion while offline!
-            this.untrackSyncedFile(file.path);
-            this.lockPath(file.path, 2000);
-            await this.app.vault.delete(file);
-          } else {
-            // New local file created in Explorer while Obsidian was closed -> push to server!
-            this.trackSyncedFile(file.path);
-            if (this.isAttachmentPath(file.path)) {
-              if (this.settings.syncAttachments) {
-                await this.syncAttachment(file);
-              }
-            } else {
-              const content = await this.app.vault.read(file);
-              const doc = this.getOrCreateDoc(file.path, content);
-              const state = Y.encodeStateAsUpdate(doc);
-              this.wsClient.send({
-                type: 'file_event',
-                action: 'create',
-                path: file.path,
-                mtime: file.stat.mtime,
-              });
-              this.wsClient.send({
-                type: 'yjs_sync',
-                path: file.path,
-                update: uint8ArrayToBase64(state),
-              });
+          this.trackSyncedFile(file.path);
+          if (this.isAttachmentPath(file.path)) {
+            if (this.settings.syncAttachments) {
+              await this.syncAttachment(file);
             }
+          } else {
+            const content = await this.app.vault.read(file);
+            const doc = this.getOrCreateDoc(file.path, content);
+            const state = Y.encodeStateAsUpdate(doc);
+            this.wsClient.send({
+              type: 'file_event',
+              action: 'create',
+              path: file.path,
+              mtime: file.stat.mtime,
+            });
+            this.wsClient.send({
+              type: 'yjs_sync',
+              path: file.path,
+              update: uint8ArrayToBase64(state),
+            });
           }
         }
       }
