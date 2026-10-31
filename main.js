@@ -186,6 +186,25 @@ function hexToRgba(hex, alpha = 0.25) {
   const b = num & 255;
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
+function computeTextChanges(oldText, newText) {
+  if (oldText === newText)
+    return [];
+  let start = 0;
+  while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+    start++;
+  }
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+  return [{
+    from: start,
+    to: oldEnd,
+    insert: newText.substring(start, newEnd)
+  }];
+}
 var RemoteCursorWidget = class extends import_view.WidgetType {
   constructor(user) {
     super();
@@ -281,12 +300,19 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           }, "cm6-init");
         } else if (yText.length > 0 && yText.toString() !== localText) {
           const yString = yText.toString();
-          this.isDispatchingRemote = true;
-          this.view.dispatch({
-            changes: { from: 0, to: localText.length, insert: yString },
-            annotations: [remoteSyncAnnotation.of(true)]
-          });
-          this.isDispatchingRemote = false;
+          const changes = computeTextChanges(localText, yString);
+          if (changes.length > 0) {
+            this.isDispatchingRemote = true;
+            const curSel = this.view.state.selection;
+            const changeDesc = this.view.state.changes(changes);
+            const mappedSel = curSel.map(changeDesc);
+            this.view.dispatch({
+              changes,
+              selection: mappedSel,
+              annotations: [remoteSyncAnnotation.of(true)]
+            });
+            this.isDispatchingRemote = false;
+          }
         }
         this.yTextObserver = (event) => {
           if (event.transaction.origin === "cm6")
@@ -308,8 +334,12 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           }
           if (changes.length > 0) {
             this.isDispatchingRemote = true;
+            const curSel = this.view.state.selection;
+            const changeDesc = this.view.state.changes(changes);
+            const mappedSel = curSel.map(changeDesc);
             this.view.dispatch({
               changes,
+              selection: mappedSel,
               annotations: [remoteSyncAnnotation.of(true)]
             });
             this.isDispatchingRemote = false;
@@ -9296,19 +9326,45 @@ var SyncEngine = class {
     if (this.isReadOnly()) {
       return;
     }
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile && activeFile.path === file.path) {
+      return;
+    }
     if (file.extension === "md" || file.extension === "txt" || file.extension === "canvas") {
       const content = await this.app.vault.read(file);
       const doc2 = this.getOrCreateDoc(file.path);
       const yText = doc2.getText("content");
-      const currentDocText = yText.toString();
-      if (currentDocText !== content) {
-        doc2.transact(() => {
-          yText.delete(0, yText.length);
-          yText.insert(0, content);
-        }, "local-file-change");
-      }
+      this.applyTextDiff(yText, content);
     } else if (this.settings.syncAttachments) {
       await this.syncAttachment(file);
+    }
+  }
+  applyTextDiff(yText, newText) {
+    const oldText = yText.toString();
+    if (oldText === newText)
+      return;
+    let start = 0;
+    while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+      start++;
+    }
+    let oldEnd = oldText.length;
+    let newEnd = newText.length;
+    while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+      oldEnd--;
+      newEnd--;
+    }
+    const deleteCount = oldEnd - start;
+    const insertStr = newText.substring(start, newEnd);
+    const doc2 = yText.doc;
+    if (doc2) {
+      doc2.transact(() => {
+        if (deleteCount > 0) {
+          yText.delete(start, deleteCount);
+        }
+        if (insertStr.length > 0) {
+          yText.insert(start, insertStr);
+        }
+      }, "local-file-diff");
     }
   }
   async pushEntireVault(onProgress) {
@@ -9616,10 +9672,26 @@ var SyncEngine = class {
     }
     const timer = window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
+      const activeFile = this.app.workspace.getActiveFile();
+      if (activeFile && activeFile.path === path) {
+        return;
+      }
       const text2 = doc2.getText("content").toString();
       await this.writeToVaultSafely(path, text2);
-    }, 400);
+    }, 1500);
     this.pendingLocalDebounce.set(path, timer);
+  }
+  async flushDocToDisk(path) {
+    const timer = this.pendingLocalDebounce.get(path);
+    if (timer) {
+      window.clearTimeout(timer);
+      this.pendingLocalDebounce.delete(path);
+    }
+    const doc2 = this.docs.get(path);
+    if (doc2) {
+      const text2 = doc2.getText("content").toString();
+      await this.writeToVaultSafely(path, text2);
+    }
   }
   async writeToVaultSafely(path, content) {
     const abstractFile = this.app.vault.getAbstractFileByPath(path);
@@ -10528,8 +10600,13 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         this.syncEngine.onLocalFileRenamed(file, oldPath);
       })
     );
+    let previousActivePath = null;
     this.registerEvent(
-      this.app.workspace.on("file-open", (file) => {
+      this.app.workspace.on("file-open", async (file) => {
+        if (previousActivePath && (!file || file.path !== previousActivePath)) {
+          await this.syncEngine.flushDocToDisk(previousActivePath);
+        }
+        previousActivePath = file ? file.path : null;
         this.awareness.updateActiveFile(file ? file.path : null);
         this.broadcastLocalAwareness();
       })

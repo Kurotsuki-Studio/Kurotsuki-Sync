@@ -38,6 +38,28 @@ function hexToRgba(hex: string, alpha = 0.25): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function computeTextChanges(oldText: string, newText: string): Array<{ from: number; to: number; insert: string }> {
+  if (oldText === newText) return [];
+
+  let start = 0;
+  while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+    start++;
+  }
+
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  return [{
+    from: start,
+    to: oldEnd,
+    insert: newText.substring(start, newEnd),
+  }];
+}
+
 class RemoteCursorWidget extends WidgetType {
   private user: PeerAwarenessState['user'];
 
@@ -157,14 +179,21 @@ export function createCollabExtension(
             yText.insert(0, localText);
           }, 'cm6-init');
         } else if (yText.length > 0 && yText.toString() !== localText) {
-          // If Yjs already has text from server/peers, sync editor to Yjs content
+          // If Yjs already has text from server/peers, sync editor to Yjs content with surgical diff & preserved cursor
           const yString = yText.toString();
-          this.isDispatchingRemote = true;
-          this.view.dispatch({
-            changes: { from: 0, to: localText.length, insert: yString },
-            annotations: [remoteSyncAnnotation.of(true)],
-          });
-          this.isDispatchingRemote = false;
+          const changes = computeTextChanges(localText, yString);
+          if (changes.length > 0) {
+            this.isDispatchingRemote = true;
+            const curSel = this.view.state.selection;
+            const changeDesc = this.view.state.changes(changes);
+            const mappedSel = curSel.map(changeDesc);
+            this.view.dispatch({
+              changes,
+              selection: mappedSel,
+              annotations: [remoteSyncAnnotation.of(true)],
+            });
+            this.isDispatchingRemote = false;
+          }
         }
 
         // Listen for inbound Yjs changes (from remote peers via WebSocket)
@@ -191,8 +220,12 @@ export function createCollabExtension(
 
           if (changes.length > 0) {
             this.isDispatchingRemote = true;
+            const curSel = this.view.state.selection;
+            const changeDesc = this.view.state.changes(changes);
+            const mappedSel = curSel.map(changeDesc);
             this.view.dispatch({
               changes,
+              selection: mappedSel,
               annotations: [remoteSyncAnnotation.of(true)],
             });
             this.isDispatchingRemote = false;

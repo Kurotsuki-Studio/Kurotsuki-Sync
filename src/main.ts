@@ -102,9 +102,14 @@ export default class KurotsukiSyncPlugin extends Plugin {
       })
     );
 
-    // 9. Track Active Workspace Leaf for Awareness
+    // 9. Track Active Workspace Leaf for Awareness & Safe Disk Flush
+    let previousActivePath: string | null = null;
     this.registerEvent(
-      this.app.workspace.on('file-open', (file) => {
+      this.app.workspace.on('file-open', async (file) => {
+        if (previousActivePath && (!file || file.path !== previousActivePath)) {
+          await this.syncEngine.flushDocToDisk(previousActivePath);
+        }
+        previousActivePath = file ? file.path : null;
         this.awareness.updateActiveFile(file ? file.path : null);
         this.broadcastLocalAwareness();
       })

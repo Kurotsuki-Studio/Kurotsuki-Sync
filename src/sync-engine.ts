@@ -147,23 +147,55 @@ export class SyncEngine {
       return;
     }
 
-    // For markdown files: sync text via Yjs
+    // IMPORTANT: If this file is currently open in the active editor,
+    // the CM6 extension is ALREADY tracking every keystroke directly into Yjs!
+    // Do NOT read stale disk cache and do NOT overwrite Yjs while user is typing!
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile && activeFile.path === file.path) {
+      return;
+    }
+
+    // For markdown files: sync text via Yjs with surgical diff
     if (file.extension === 'md' || file.extension === 'txt' || file.extension === 'canvas') {
       const content = await this.app.vault.read(file);
       const doc = this.getOrCreateDoc(file.path);
       const yText = doc.getText('content');
-      const currentDocText = yText.toString();
-
-      if (currentDocText !== content) {
-        // Update Yjs text to match file content
-        doc.transact(() => {
-          yText.delete(0, yText.length);
-          yText.insert(0, content);
-        }, 'local-file-change');
-      }
+      this.applyTextDiff(yText, content);
     } else if (this.settings.syncAttachments) {
       // Binary attachment sync
       await this.syncAttachment(file);
+    }
+  }
+
+  private applyTextDiff(yText: Y.Text, newText: string): void {
+    const oldText = yText.toString();
+    if (oldText === newText) return;
+
+    let start = 0;
+    while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+      start++;
+    }
+
+    let oldEnd = oldText.length;
+    let newEnd = newText.length;
+    while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+      oldEnd--;
+      newEnd--;
+    }
+
+    const deleteCount = oldEnd - start;
+    const insertStr = newText.substring(start, newEnd);
+
+    const doc = yText.doc;
+    if (doc) {
+      doc.transact(() => {
+        if (deleteCount > 0) {
+          yText.delete(start, deleteCount);
+        }
+        if (insertStr.length > 0) {
+          yText.insert(start, insertStr);
+        }
+      }, 'local-file-diff');
     }
   }
 
@@ -503,11 +535,32 @@ export class SyncEngine {
 
     const timer = window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
+
+      // Protect active editor: do NOT overwrite the file on disk while actively open in editor
+      // Writing to an active file causes Obsidian to reload the buffer and resets the cursor to 0
+      const activeFile = this.app.workspace.getActiveFile();
+      if (activeFile && activeFile.path === path) {
+        return;
+      }
+
       const text = doc.getText('content').toString();
       await this.writeToVaultSafely(path, text);
-    }, 400);
+    }, 1500);
 
     this.pendingLocalDebounce.set(path, timer);
+  }
+
+  public async flushDocToDisk(path: string): Promise<void> {
+    const timer = this.pendingLocalDebounce.get(path);
+    if (timer) {
+      window.clearTimeout(timer);
+      this.pendingLocalDebounce.delete(path);
+    }
+    const doc = this.docs.get(path);
+    if (doc) {
+      const text = doc.getText('content').toString();
+      await this.writeToVaultSafely(path, text);
+    }
   }
 
   private async writeToVaultSafely(path: string, content: string): Promise<void> {
