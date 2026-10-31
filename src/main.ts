@@ -197,6 +197,23 @@ export default class KurotsukiSyncPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: 'kurotsuki-push-vault',
+      name: 'Push Entire Vault to Relay Server',
+      callback: async () => {
+        if (this.wsClient.getStatus() !== 'connected') {
+          new Notice('⚠️ Kurotsuki Relay is not connected. Connect first.');
+          return;
+        }
+        const notice = new Notice('⏳ Pushing entire vault to Kurotsuki Relay...', 0);
+        const res = await this.syncEngine.pushEntireVault((cur, tot, p) => {
+          notice.setMessage(`⏳ Pushing vault: ${cur}/${tot}\n${p.split('/').pop()}`);
+        });
+        notice.hide();
+        new Notice(`✅ Vault pushed to relay! (${res.success} files synchronized, ${res.failed} errors)`, 5000);
+      },
+    });
+
     // 12. Add Settings Tab
     this.addSettingTab(new KurotsukiSettingTab(this.app, this));
 

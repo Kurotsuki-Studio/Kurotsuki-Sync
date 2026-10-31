@@ -702,6 +702,32 @@ var KurotsukiSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    containerEl.createEl("h3", { text: "\u26A1 Vault Push & Cloud Sync" });
+    new import_obsidian2.Setting(containerEl).setName("Push Entire Vault to Server").setDesc("Upload and synchronize all local notes, folders, and media assets to your Kurotsuki Relay server right now.").addButton(
+      (btn) => btn.setButtonText("\u{1F4E4} Push Entire Vault Now").setCta().onClick(async () => {
+        if (this.plugin.wsClient.getStatus() !== "connected") {
+          new import_obsidian2.Notice("\u26A0\uFE0F Le serveur relais n'est pas connect\xE9. Veuillez vous connecter d'abord.");
+          return;
+        }
+        btn.setDisabled(true);
+        btn.setButtonText("Pushing...");
+        const notice = new import_obsidian2.Notice("\u23F3 Poussement du coffre vers le serveur relais...", 0);
+        try {
+          const res = await this.plugin.syncEngine.pushEntireVault((cur, tot, p) => {
+            notice.setMessage(`\u23F3 Synchronisation (${cur}/${tot}) :
+${p.split("/").pop()}`);
+          });
+          notice.hide();
+          new import_obsidian2.Notice(`\u2705 Coffre envoy\xE9 avec succ\xE8s ! (${res.success} fichiers synchronis\xE9s, ${res.failed} erreurs)`, 6e3);
+        } catch (err) {
+          notice.hide();
+          new import_obsidian2.Notice(`\u274C Erreur : ${err.message}`);
+        } finally {
+          btn.setDisabled(false);
+          btn.setButtonText("\u{1F4E4} Push Entire Vault Now");
+        }
+      })
+    );
   }
 };
 
@@ -9220,6 +9246,52 @@ var SyncEngine = class {
       await this.syncAttachment(file);
     }
   }
+  async pushEntireVault(onProgress) {
+    if (this.isReadOnly()) {
+      new import_obsidian3.Notice("\u{1F512} Cannot push: Vault is in Read-Only (Viewer) mode");
+      return { success: 0, failed: 0 };
+    }
+    const allFiles = this.app.vault.getFiles().filter((f) => this.shouldSync(f.path));
+    let success = 0;
+    let failed = 0;
+    for (let i = 0; i < allFiles.length; i++) {
+      const file = allFiles[i];
+      if (onProgress) {
+        onProgress(i + 1, allFiles.length, file.path);
+      }
+      try {
+        if (file.extension === "md" || file.extension === "txt" || file.extension === "canvas") {
+          const content = await this.app.vault.read(file);
+          const doc2 = this.getOrCreateDoc(file.path, content);
+          const state = encodeStateAsUpdate(doc2);
+          this.wsClient.send({
+            type: "file_event",
+            action: "create",
+            path: file.path,
+            mtime: file.stat.mtime
+          });
+          this.wsClient.send({
+            type: "yjs_sync",
+            path: file.path,
+            update: uint8ArrayToBase64(state)
+          });
+        } else if (this.settings.syncAttachments) {
+          await this.syncAttachment(file);
+        }
+        this.trackSyncedFile(file.path);
+        success++;
+      } catch (err) {
+        console.error(`[Kurotsuki] Failed to push file ${file.path}:`, err);
+        failed++;
+      }
+    }
+    this.recordHistory({
+      type: "local_update",
+      path: "*",
+      summary: `Pushed entire vault to relay (${success} files, ${failed} failed)`
+    });
+    return { success, failed };
+  }
   getSyncedFilesMap() {
     if (!this.settings.syncedFiles) {
       this.settings.syncedFiles = {};
@@ -10435,6 +10507,23 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
           await this.syncEngine.onLocalFileModified(file);
           new import_obsidian8.Notice(`Kurotsuki Sync: Synced ${file.name}`);
         }
+      }
+    });
+    this.addCommand({
+      id: "kurotsuki-push-vault",
+      name: "Push Entire Vault to Relay Server",
+      callback: async () => {
+        if (this.wsClient.getStatus() !== "connected") {
+          new import_obsidian8.Notice("\u26A0\uFE0F Kurotsuki Relay is not connected. Connect first.");
+          return;
+        }
+        const notice = new import_obsidian8.Notice("\u23F3 Pushing entire vault to Kurotsuki Relay...", 0);
+        const res = await this.syncEngine.pushEntireVault((cur, tot, p) => {
+          notice.setMessage(`\u23F3 Pushing vault: ${cur}/${tot}
+${p.split("/").pop()}`);
+        });
+        notice.hide();
+        new import_obsidian8.Notice(`\u2705 Vault pushed to relay! (${res.success} files synchronized, ${res.failed} errors)`, 5e3);
       }
     });
     this.addSettingTab(new KurotsukiSettingTab(this.app, this));

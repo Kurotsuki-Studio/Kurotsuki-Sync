@@ -129,6 +129,63 @@ export class SyncEngine {
     }
   }
 
+  public async pushEntireVault(
+    onProgress?: (current: number, total: number, path: string) => void
+  ): Promise<{ success: number; failed: number }> {
+    if (this.isReadOnly()) {
+      new Notice('🔒 Cannot push: Vault is in Read-Only (Viewer) mode');
+      return { success: 0, failed: 0 };
+    }
+
+    const allFiles = this.app.vault.getFiles().filter((f) => this.shouldSync(f.path));
+    let success = 0;
+    let failed = 0;
+
+    for (let i = 0; i < allFiles.length; i++) {
+      const file = allFiles[i];
+      if (onProgress) {
+        onProgress(i + 1, allFiles.length, file.path);
+      }
+
+      try {
+        if (file.extension === 'md' || file.extension === 'txt' || file.extension === 'canvas') {
+          const content = await this.app.vault.read(file);
+          const doc = this.getOrCreateDoc(file.path, content);
+          const state = Y.encodeStateAsUpdate(doc);
+
+          this.wsClient.send({
+            type: 'file_event',
+            action: 'create',
+            path: file.path,
+            mtime: file.stat.mtime,
+          });
+
+          this.wsClient.send({
+            type: 'yjs_sync',
+            path: file.path,
+            update: uint8ArrayToBase64(state),
+          });
+        } else if (this.settings.syncAttachments) {
+          await this.syncAttachment(file);
+        }
+
+        this.trackSyncedFile(file.path);
+        success++;
+      } catch (err) {
+        console.error(`[Kurotsuki] Failed to push file ${file.path}:`, err);
+        failed++;
+      }
+    }
+
+    this.recordHistory({
+      type: 'local_update',
+      path: '*',
+      summary: `Pushed entire vault to relay (${success} files, ${failed} failed)`,
+    });
+
+    return { success, failed };
+  }
+
   private getSyncedFilesMap(): Record<string, number> {
     if (!this.settings.syncedFiles) {
       this.settings.syncedFiles = {};

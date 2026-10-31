@@ -241,5 +241,39 @@ export class KurotsukiSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    // Vault Push & Synchronization
+    containerEl.createEl('h3', { text: '⚡ Vault Push & Cloud Sync' });
+
+    new Setting(containerEl)
+      .setName('Push Entire Vault to Server')
+      .setDesc('Upload and synchronize all local notes, folders, and media assets to your Kurotsuki Relay server right now.')
+      .addButton((btn) =>
+        btn
+          .setButtonText('📤 Push Entire Vault Now')
+          .setCta()
+          .onClick(async () => {
+            if (this.plugin.wsClient.getStatus() !== 'connected') {
+              new Notice("⚠️ Le serveur relais n'est pas connecté. Veuillez vous connecter d'abord.");
+              return;
+            }
+            btn.setDisabled(true);
+            btn.setButtonText('Pushing...');
+            const notice = new Notice('⏳ Poussement du coffre vers le serveur relais...', 0);
+            try {
+              const res = await this.plugin.syncEngine.pushEntireVault((cur, tot, p) => {
+                notice.setMessage(`⏳ Synchronisation (${cur}/${tot}) :\n${p.split('/').pop()}`);
+              });
+              notice.hide();
+              new Notice(`✅ Coffre envoyé avec succès ! (${res.success} fichiers synchronisés, ${res.failed} erreurs)`, 6000);
+            } catch (err: any) {
+              notice.hide();
+              new Notice(`❌ Erreur : ${err.message}`);
+            } finally {
+              btn.setDisabled(false);
+              btn.setButtonText('📤 Push Entire Vault Now');
+            }
+          })
+      );
   }
 }
