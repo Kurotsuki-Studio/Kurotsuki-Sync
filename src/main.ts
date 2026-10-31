@@ -1,4 +1,5 @@
 import { Editor, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { EditorView } from '@codemirror/view';
 import { AwarenessManager } from './awareness';
 import { createCollabExtension, setReadOnlyEffect } from './cm6-collab';
 import { KurotsukiSettingTab } from './settings';
@@ -50,7 +51,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
     this.registerEditorExtension(
       createCollabExtension(
         this.awareness,
-        () => this.getRobustActiveFilePath(),
+        (view?: EditorView) => this.getPathForView(view),
         (path: string) => this.syncEngine.getOrCreateDoc(path),
         () => this.syncEngine.isReadOnly(),
         () => this.notifyReadOnlyAttempt()
@@ -137,6 +138,15 @@ export default class KurotsukiSyncPlugin extends Plugin {
         this.broadcastLocalAwareness();
       }
     }, 3000);
+
+    // Initial Active File Resolution on startup / mobile layout ready
+    this.app.workspace.onLayoutReady(() => {
+      const initialFile = this.getRobustActiveFilePath();
+      if (initialFile) {
+        this.awareness.updateActiveFile(initialFile);
+        this.broadcastLocalAwareness();
+      }
+    });
 
     // 11. Register Commands
     this.addCommand({
@@ -353,6 +363,21 @@ export default class KurotsukiSyncPlugin extends Plugin {
         }
       }
     });
+  }
+
+  public getPathForView(view?: EditorView): string | null {
+    if (view && view.dom) {
+      let foundPath: string | null = null;
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        if (!foundPath && leaf.view instanceof MarkdownView && leaf.view.file) {
+          if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) {
+            foundPath = leaf.view.file.path;
+          }
+        }
+      });
+      if (foundPath) return foundPath;
+    }
+    return this.getRobustActiveFilePath();
   }
 
   public getRobustActiveFilePath(): string | null {

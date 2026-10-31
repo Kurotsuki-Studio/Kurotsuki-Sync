@@ -281,9 +281,12 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         }
       }
       bindActiveYDoc() {
-        const path = getActiveFilePath();
+        const path = getActiveFilePath(this.view);
         if (!path) {
           return;
+        }
+        if (awareness.getLocalState().activeFile !== path) {
+          awareness.updateActiveFile(path);
         }
         if (path === this.boundPath && this.currentYText)
           return;
@@ -384,6 +387,10 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           }
         }
         if (update.selectionSet) {
+          const path = getActiveFilePath(update.view);
+          if (path && awareness.getLocalState().activeFile !== path) {
+            awareness.updateActiveFile(path);
+          }
           const main = update.state.selection.main;
           awareness.updateCursor({
             anchor: main.anchor,
@@ -425,7 +432,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         }
       }
       buildDecorations(view) {
-        const currentPath = getActiveFilePath();
+        const currentPath = getActiveFilePath(view);
         if (!currentPath)
           return import_view.Decoration.none;
         const peers = awareness.getActivePeersForFile(currentPath);
@@ -10610,7 +10617,7 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
     this.registerEditorExtension(
       createCollabExtension(
         this.awareness,
-        () => this.getRobustActiveFilePath(),
+        (view) => this.getPathForView(view),
         (path) => this.syncEngine.getOrCreateDoc(path),
         () => this.syncEngine.isReadOnly(),
         () => this.notifyReadOnlyAttempt()
@@ -10678,6 +10685,13 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         this.broadcastLocalAwareness();
       }
     }, 3e3);
+    this.app.workspace.onLayoutReady(() => {
+      const initialFile = this.getRobustActiveFilePath();
+      if (initialFile) {
+        this.awareness.updateActiveFile(initialFile);
+        this.broadcastLocalAwareness();
+      }
+    });
     this.addCommand({
       id: "kurotsuki-status",
       name: "Open Sync Dashboard & Collaborators",
@@ -10865,6 +10879,21 @@ ${p.split("/").pop()}`);
         }
       }
     });
+  }
+  getPathForView(view) {
+    if (view && view.dom) {
+      let foundPath = null;
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
+          if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) {
+            foundPath = leaf.view.file.path;
+          }
+        }
+      });
+      if (foundPath)
+        return foundPath;
+    }
+    return this.getRobustActiveFilePath();
   }
   getRobustActiveFilePath() {
     const activeFile = this.app.workspace.getActiveFile();

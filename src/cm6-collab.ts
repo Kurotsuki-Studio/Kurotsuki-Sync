@@ -93,7 +93,7 @@ class RemoteCursorWidget extends WidgetType {
 
 export function createCollabExtension(
   awareness: AwarenessManager,
-  getActiveFilePath: () => string | null,
+  getActiveFilePath: (view?: EditorView) => string | null,
   getYDocForPath: (path: string) => Y.Doc | null,
   isReadOnly: () => boolean = () => false,
   onReadOnlyAttempt?: () => void
@@ -157,12 +157,18 @@ export function createCollabExtension(
       }
 
       private bindActiveYDoc(): void {
-        const path = getActiveFilePath();
+        const path = getActiveFilePath(this.view);
         if (!path) {
           // On mobile, keyboard popup or focus shifts may temporarily cause getActiveFilePath() to return null.
           // Keep current binding intact so user input is never lost or unbound!
           return;
         }
+
+        // Keep awareness synchronized with the active note
+        if (awareness.getLocalState().activeFile !== path) {
+          awareness.updateActiveFile(path);
+        }
+
         if (path === this.boundPath && this.currentYText) return;
 
         // Unbind previous
@@ -282,6 +288,10 @@ export function createCollabExtension(
 
         // Send local cursor to awareness
         if (update.selectionSet) {
+          const path = getActiveFilePath(update.view);
+          if (path && awareness.getLocalState().activeFile !== path) {
+            awareness.updateActiveFile(path);
+          }
           const main = update.state.selection.main;
           awareness.updateCursor({
             anchor: main.anchor,
@@ -328,7 +338,7 @@ export function createCollabExtension(
       }
 
       private buildDecorations(view: EditorView): DecorationSet {
-        const currentPath = getActiveFilePath();
+        const currentPath = getActiveFilePath(view);
         if (!currentPath) return Decoration.none;
 
         const peers = awareness.getActivePeersForFile(currentPath);
