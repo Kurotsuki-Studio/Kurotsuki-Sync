@@ -256,8 +256,8 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         this.awarenessScheduled = true;
         requestAnimationFrame(() => {
           this.awarenessScheduled = false;
-          if (this.view.composing) {
-            setTimeout(() => this.scheduleAwarenessUpdate(), 80);
+          if (this.view.composing || document.body.classList.contains("is-mobile") && this.view.hasFocus) {
+            setTimeout(() => this.scheduleAwarenessUpdate(), 250);
             return;
           }
           if (this.view.dom && this.view.dom.isConnected) {
@@ -9311,7 +9311,18 @@ var SyncEngine = class {
           console.warn(`[Kurotsuki] Sync blocked: Vault is in read-only mode for ${path}`);
           return;
         }
-        this.queueOutgoingYjsUpdate(path, update);
+        const b64 = uint8ArrayToBase64(update);
+        this.recordHistory({
+          type: "local_update",
+          path,
+          sizeBytes: update.length,
+          summary: `Sent local CRDT update (${update.length} bytes)`
+        });
+        this.wsClient.send({
+          type: "yjs_sync",
+          path,
+          update: b64
+        });
       });
       this.docs.set(path, doc2);
     }
@@ -10339,6 +10350,7 @@ var KurotsukiWSClient = class {
     this.reconnectAttempts = 0;
     this.manualDisconnect = false;
     this.lastPingSentAt = null;
+    this.outgoingQueue = [];
     this.settings = settings;
     this.getUserProfile = getUserProfile;
     this.currentRole = settings.currentRole || "unknown";
@@ -10395,6 +10407,7 @@ var KurotsukiWSClient = class {
             role: this.currentRole !== "unknown" ? this.currentRole : void 0
           }
         });
+        this.flushOutgoingQueue();
       };
       this.ws.onmessage = (event) => {
         try {
@@ -10460,6 +10473,12 @@ var KurotsukiWSClient = class {
   }
   send(msg) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (msg.type === "yjs_sync" || msg.type === "file_event" || msg.type === "doc_request") {
+        this.outgoingQueue.push(msg);
+        if (this.outgoingQueue.length > 500) {
+          this.outgoingQueue.shift();
+        }
+      }
       return false;
     }
     try {
@@ -10468,6 +10487,21 @@ var KurotsukiWSClient = class {
     } catch (err) {
       console.error("[Kurotsuki] Failed to send WebSocket message:", err);
       return false;
+    }
+  }
+  flushOutgoingQueue() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN)
+      return;
+    while (this.outgoingQueue.length > 0) {
+      const msg = this.outgoingQueue.shift();
+      if (msg) {
+        try {
+          this.ws.send(JSON.stringify(msg));
+        } catch (err) {
+          console.error("[Kurotsuki] Failed to flush queued message:", err);
+          break;
+        }
+      }
     }
   }
   sendPing() {

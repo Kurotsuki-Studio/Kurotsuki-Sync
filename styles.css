@@ -27,19 +27,17 @@
   white-space: nowrap;
   pointer-events: none;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-  opacity: 0.88;
-  transition: opacity 0.3s ease-in-out;
+  opacity: 0.85;
+  transition: opacity 0.2s ease-in-out;
   user-select: none;
   z-index: 101;
 }
 
+/* On mobile, hide the floating name label to prevent blocking the keyboard / text */
 .is-mobile .cm-kurotsuki-cursor-label,
 @media (max-width: 768px) {
   .cm-kurotsuki-cursor-label {
-    top: -1.1em;
-    font-size: 0.58rem;
-    padding: 0 3px;
-    opacity: 0.75;
+    display: none !important;
   }
 }
 

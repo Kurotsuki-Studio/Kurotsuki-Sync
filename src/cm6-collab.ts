@@ -129,9 +129,9 @@ export function createCollabExtension(
         this.awarenessScheduled = true;
         requestAnimationFrame(() => {
           this.awarenessScheduled = false;
-          // Protect mobile virtual keyboard from IME freeze: do not dispatch during active composition
-          if (this.view.composing) {
-            setTimeout(() => this.scheduleAwarenessUpdate(), 80);
+          // Protect mobile virtual keyboard: do not dispatch awareness during composition or while typing focused on mobile
+          if (this.view.composing || (document.body.classList.contains('is-mobile') && this.view.hasFocus)) {
+            setTimeout(() => this.scheduleAwarenessUpdate(), 250);
             return;
           }
           if (this.view.dom && this.view.dom.isConnected) {

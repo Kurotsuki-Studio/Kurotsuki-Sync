@@ -122,7 +122,19 @@ export class SyncEngine {
           return;
         }
 
-        this.queueOutgoingYjsUpdate(path, update);
+        const b64 = uint8ArrayToBase64(update);
+        this.recordHistory({
+          type: 'local_update',
+          path,
+          sizeBytes: update.length,
+          summary: `Sent local CRDT update (${update.length} bytes)`,
+        });
+
+        this.wsClient.send({
+          type: 'yjs_sync',
+          path,
+          update: b64,
+        });
       });
 
       this.docs.set(path, doc);

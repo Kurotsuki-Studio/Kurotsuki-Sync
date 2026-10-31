@@ -22,6 +22,7 @@ export class KurotsukiWSClient {
   private reconnectAttempts = 0;
   private manualDisconnect = false;
   private lastPingSentAt: number | null = null;
+  private outgoingQueue: WSMessage[] = [];
 
   constructor(settings: KurotsukiSettings, getUserProfile: () => UserProfile) {
     this.settings = settings;
@@ -92,6 +93,8 @@ export class KurotsukiWSClient {
             role: this.currentRole !== 'unknown' ? this.currentRole : undefined,
           },
         });
+        // Flush any buffered messages from disconnect/reconnect
+        this.flushOutgoingQueue();
       };
 
       this.ws.onmessage = (event) => {
@@ -165,6 +168,13 @@ export class KurotsukiWSClient {
 
   public send(msg: WSMessage): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Buffer critical sync/file messages if socket is temporarily connecting or reconnecting
+      if (msg.type === 'yjs_sync' || msg.type === 'file_event' || msg.type === 'doc_request') {
+        this.outgoingQueue.push(msg);
+        if (this.outgoingQueue.length > 500) {
+          this.outgoingQueue.shift();
+        }
+      }
       return false;
     }
     try {
@@ -173,6 +183,21 @@ export class KurotsukiWSClient {
     } catch (err) {
       console.error('[Kurotsuki] Failed to send WebSocket message:', err);
       return false;
+    }
+  }
+
+  private flushOutgoingQueue(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    while (this.outgoingQueue.length > 0) {
+      const msg = this.outgoingQueue.shift();
+      if (msg) {
+        try {
+          this.ws.send(JSON.stringify(msg));
+        } catch (err) {
+          console.error('[Kurotsuki] Failed to flush queued message:', err);
+          break;
+        }
+      }
     }
   }
 
