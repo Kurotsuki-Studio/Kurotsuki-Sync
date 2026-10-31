@@ -17,6 +17,7 @@ data/
 *.sqlite3
 storage/
 attachments/
+test-data/
 .env
 
 # Obsidian local config

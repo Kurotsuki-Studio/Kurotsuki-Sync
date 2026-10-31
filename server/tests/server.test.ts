@@ -39,6 +39,8 @@ describe('Kurotsuki Sync Relay Server', () => {
 
   after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    const fs = await import('node:fs');
+    fs.rmSync('./test-data', { recursive: true, force: true });
   });
 
   test('Health check endpoint returns status ok and server info', async () => {

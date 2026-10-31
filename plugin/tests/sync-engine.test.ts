@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import test, { describe } from 'node:test';
 import { AwarenessManager } from '../src/awareness.js';
-import { base64ToUint8Array, uint8ArrayToBase64 } from '../src/sync-engine.js';
+import { base64ToUint8Array, uint8ArrayToBase64 } from '../src/utils.js';
 import { KurotsukiSettings } from '../src/types.js';
 
 describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
