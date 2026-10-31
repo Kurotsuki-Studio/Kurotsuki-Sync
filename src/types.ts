@@ -1,9 +1,12 @@
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'syncing' | 'error';
 
+export type UserRole = 'admin' | 'editor' | 'viewer' | 'unknown';
+
 export interface UserProfile {
   id: string;
   name: string;
   color: string;
+  role?: UserRole;
 }
 
 export interface RemoteCursor {
@@ -21,6 +24,17 @@ export interface PeerAwarenessState {
 
 export type SyncMode = 'entire_vault' | 'selective';
 
+export interface VaultProfile {
+  id: string;
+  name: string;
+  serverUrl: string;
+  vaultId: string;
+  authToken: string;
+  role?: UserRole;
+  syncMode?: SyncMode;
+  sharedFolders?: string[];
+}
+
 export interface KurotsukiSettings {
   serverUrl: string;
   authToken: string;
@@ -33,6 +47,10 @@ export interface KurotsukiSettings {
   maxAttachmentSizeMB: number;
   autoConnect: boolean;
   enableLiveCursors: boolean;
+  currentRole: UserRole;
+  vaultProfiles: VaultProfile[];
+  activeProfileId: string;
+  syncedFiles?: Record<string, number>;
 }
 
 export const DEFAULT_SETTINGS: KurotsukiSettings = {
@@ -47,6 +65,19 @@ export const DEFAULT_SETTINGS: KurotsukiSettings = {
   maxAttachmentSizeMB: 20,
   autoConnect: true,
   enableLiveCursors: true,
+  currentRole: 'unknown',
+  syncedFiles: {},
+  vaultProfiles: [
+    {
+      id: 'default-profile',
+      name: 'Default Workspace',
+      serverUrl: 'ws://localhost:3000',
+      vaultId: 'default-vault',
+      authToken: '',
+      role: 'editor',
+    },
+  ],
+  activeProfileId: 'default-profile',
 };
 
 export const COLOR_PALETTE = [
@@ -65,11 +96,24 @@ export const COLOR_PALETTE = [
 // Protocol Messages
 export type WSMessage =
   | { type: 'auth'; token: string; vaultId: string; clientInfo: UserProfile }
-  | { type: 'auth_ack'; success: boolean; message?: string; serverVersion: string }
+  | { type: 'auth_ack'; success: boolean; message?: string; serverVersion: string; role?: UserRole; vaultId?: string }
   | { type: 'yjs_sync'; path: string; update: string }
   | { type: 'awareness_update'; states: PeerAwarenessState[] }
   | { type: 'file_event'; action: 'create' | 'modify' | 'delete' | 'rename'; path: string; oldPath?: string; hash?: string; mtime?: number }
   | { type: 'file_list_request' }
-  | { type: 'file_list_response'; files: Array<{ path: string; hash?: string; mtime: number }> }
-  | { type: 'ping' }
-  | { type: 'pong' };
+  | { type: 'file_list_response'; files: Array<{ path: string; hash?: string; mtime: number; isAttachment?: boolean }> }
+  | { type: 'doc_request'; path: string }
+  | { type: 'doc_response'; path: string; update: string }
+  | { type: 'ping'; timestamp?: number }
+  | { type: 'pong'; timestamp?: number }
+  | { type: 'error'; message: string; code?: string };
+
+export interface SyncHistoryEntry {
+  id: string;
+  timestamp: number;
+  path: string;
+  author?: string;
+  type: 'remote_update' | 'local_update' | 'file_event' | 'conflict_detected' | 'error';
+  sizeBytes?: number;
+  summary: string;
+}

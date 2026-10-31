@@ -1,6 +1,7 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type KurotsukiSyncPlugin from './main';
 import { COLOR_PALETTE, SyncMode } from './types';
+import { VaultSwitcherModal } from './ui/vault-switcher-modal';
 
 export class KurotsukiSettingTab extends PluginSettingTab {
   plugin: KurotsukiSyncPlugin;
@@ -19,6 +20,44 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       text: 'Configure your self-hosted relay server, collaboration profile, and synchronization scope.',
       attr: { style: 'color: var(--text-muted);' },
     });
+
+    // Role & Connection State Banner
+    const role = this.plugin.wsClient.getCurrentRole();
+    const status = this.plugin.wsClient.getStatus();
+    const latency = this.plugin.wsClient.getLatency();
+
+    const banner = containerEl.createDiv({ cls: 'kurotsuki-settings-banner' });
+    const bannerRow = banner.createDiv({ cls: 'kurotsuki-banner-row' });
+    bannerRow.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+    bannerRow.createEl('strong', { text: `Relay Status: ${status.toUpperCase()}` });
+    bannerRow.createSpan({
+      cls: `kurotsuki-role-badge kurotsuki-role-${role}`,
+      text: `ROLE: ${role.toUpperCase()}`,
+    });
+
+    if (latency !== null) {
+      bannerRow.createSpan({ text: ` • Ping: ${latency}ms` });
+    }
+
+    if (role === 'viewer') {
+      const viewerNotice = banner.createDiv({ cls: 'kurotsuki-banner-subnotice' });
+      viewerNotice.textContent = '🔒 Read-Only Active: Editor changes in Obsidian are locked and local saves will not overwrite the relay.';
+    }
+
+    // Multi-Vault Profiles Header
+    containerEl.createEl('h3', { text: '🗂️ Multi-Vault & Room Profiles' });
+
+    new Setting(containerEl)
+      .setName('Manage Vault Profiles')
+      .setDesc('Configure and switch between multiple remote rooms and vaults')
+      .addButton((btn) =>
+        btn
+          .setButtonText('Switch / Edit Profiles')
+          .setCta()
+          .onClick(() => {
+            new VaultSwitcherModal(this.app, this.plugin).open();
+          })
+      );
 
     // Server Configuration Header
     containerEl.createEl('h3', { text: '🌐 Server Connection' });
@@ -78,12 +117,20 @@ export class KurotsukiSettingTab extends PluginSettingTab {
                 httpBase = 'http://' + httpBase;
               }
               const res = await fetch(`${httpBase}/api/v1/health`);
-              if (res.ok) {
-                const data = await res.json();
-                new Notice(`✅ Connected! Server: ${data.name || 'Kurotsuki Relay'} (v${data.version || '1.0.0'})`);
-              } else {
-                new Notice(`⚠️ Server returned HTTP ${res.status}`);
+              if (!res.ok) {
+                new Notice(`⚠️ Le serveur ne répond pas (HTTP ${res.status})`);
+                return;
               }
+              const statsRes = await fetch(`${httpBase}/api/v1/stats`, {
+                headers: { Authorization: `Bearer ${this.plugin.settings.authToken}` },
+              });
+              if (statsRes.status === 401) {
+                new Notice('❌ Token / Mot de passe incorrect ! Le serveur refuse la connexion.');
+                return;
+              }
+              new Notice('✅ Connexion et mot de passe validés !');
+              this.plugin.wsClient.disconnect(false);
+              this.plugin.wsClient.connect();
             } catch (err: any) {
               new Notice(`❌ Connection failed: ${err.message || 'Cannot reach server'}`);
             } finally {

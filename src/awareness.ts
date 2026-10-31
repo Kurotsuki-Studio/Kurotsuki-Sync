@@ -85,6 +85,10 @@ export class AwarenessManager {
     return Array.from(this.remotePeers.values());
   }
 
+  public getAllPeers(): PeerAwarenessState[] {
+    return this.getAllRemotePeers();
+  }
+
   public subscribe(listener: AwarenessListener): () => void {
     this.listeners.add(listener);
     listener(this.getAllRemotePeers());

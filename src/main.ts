@@ -1,11 +1,14 @@
-import { Editor, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
+import { Editor, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { AwarenessManager } from './awareness';
-import { createCollabExtension } from './cm6-collab';
+import { createCollabExtension, setReadOnlyEffect } from './cm6-collab';
 import { KurotsukiSettingTab } from './settings';
 import { SyncEngine } from './sync-engine';
-import { ConnectionStatus, DEFAULT_SETTINGS, KurotsukiSettings, UserProfile, WSMessage } from './types';
+import { ConnectionStatus, DEFAULT_SETTINGS, KurotsukiSettings, UserProfile, UserRole, WSMessage } from './types';
+import { HistoryInspectorModal } from './ui/history-inspector-modal';
+import { KurotsukiPeerSidebarView, VIEW_TYPE_KUROTSUKI_PEERS } from './ui/peer-sidebar-view';
 import { ShareModal } from './ui/share-modal';
 import { StatusModal } from './ui/status-modal';
+import { VaultSwitcherModal } from './ui/vault-switcher-modal';
 import { KurotsukiWSClient } from './ws-client';
 
 export default class KurotsukiSyncPlugin extends Plugin {
@@ -15,6 +18,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
   awareness!: AwarenessManager;
   private statusBarEl!: HTMLElement;
   private awarenessBroadcastInterval: number | null = null;
+  private lastReadOnlyNoticeTime = 0;
 
   async onload() {
     await this.loadSettings();
@@ -32,29 +36,42 @@ export default class KurotsukiSyncPlugin extends Plugin {
       id: initialUser.id,
       name: this.settings.userName,
       color: this.settings.userColor,
+      role: this.settings.currentRole,
     }));
 
     // 3. Initialize Sync Engine
     this.syncEngine = new SyncEngine(this.app, this.settings, this.wsClient);
 
-    // 4. Register CM6 Editor Extension
+    // 4. Register CM6 Editor Extension with Active Read-Only Guard
     this.registerEditorExtension(
       createCollabExtension(
         this.awareness,
         () => this.app.workspace.getActiveFile()?.path || null,
-        (path: string) => this.syncEngine.getOrCreateDoc(path)
+        (path: string) => this.syncEngine.getOrCreateDoc(path),
+        () => this.syncEngine.isReadOnly(),
+        () => this.notifyReadOnlyAttempt()
       )
     );
 
-    // 5. Register Status Bar
+    // 5. Register Peer Sidebar View
+    this.registerView(
+      VIEW_TYPE_KUROTSUKI_PEERS,
+      (leaf) => new KurotsukiPeerSidebarView(leaf, this)
+    );
+
+    // 6. Register Status Bar
     this.setupStatusBar();
 
-    // 6. Register Ribbon Icon
-    this.addRibbonIcon('refresh-cw', 'Kurotsuki Sync', () => {
-      new StatusModal(this.app, this.settings, this.wsClient, this.awareness).open();
+    // 7. Register Ribbon Icons
+    this.addRibbonIcon('refresh-cw', 'Kurotsuki Sync Dashboard', () => {
+      new StatusModal(this.app, this).open();
     });
 
-    // 7. Register Vault Events for Local Synchronization
+    this.addRibbonIcon('users', 'Kurotsuki Collaborators', async () => {
+      await this.activatePeerSidebar();
+    });
+
+    // 8. Register Vault Events for Local Synchronization
     this.registerEvent(
       this.app.vault.on('modify', async (file) => {
         if (file instanceof TFile) {
@@ -81,7 +98,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
       })
     );
 
-    // 8. Track Active Workspace Leaf for Awareness
+    // 9. Track Active Workspace Leaf for Awareness
     this.registerEvent(
       this.app.workspace.on('file-open', (file) => {
         this.awareness.updateActiveFile(file ? file.path : null);
@@ -89,10 +106,19 @@ export default class KurotsukiSyncPlugin extends Plugin {
       })
     );
 
-    // 9. Handle Inbound Awareness Updates
+    // 10. Handle Inbound Awareness Updates & Server Events
     this.wsClient.onMessage((msg: WSMessage) => {
       if (msg.type === 'awareness_update') {
         this.awareness.handleRemoteAwareness(msg.states);
+      }
+    });
+
+    this.wsClient.onRoleChange((role: UserRole) => {
+      this.settings.currentRole = role;
+      this.syncEngine.updateSettings(this.settings);
+      this.updateEditorReadOnlyState(role === 'viewer');
+      if (role === 'viewer') {
+        new Notice('🔒 Connected as Viewer: Vault is read-only. Editing is disabled.', 5000);
       }
     });
 
@@ -103,12 +129,36 @@ export default class KurotsukiSyncPlugin extends Plugin {
       }
     }, 3000);
 
-    // 10. Register Commands
+    // 11. Register Commands
     this.addCommand({
       id: 'kurotsuki-status',
-      name: 'View Connection Status & Collaborators',
+      name: 'Open Sync Dashboard & Collaborators',
       callback: () => {
-        new StatusModal(this.app, this.settings, this.wsClient, this.awareness).open();
+        new StatusModal(this.app, this).open();
+      },
+    });
+
+    this.addCommand({
+      id: 'kurotsuki-switch-vault',
+      name: 'Switch Vault / Room Profile',
+      callback: () => {
+        new VaultSwitcherModal(this.app, this).open();
+      },
+    });
+
+    this.addCommand({
+      id: 'kurotsuki-open-peer-sidebar',
+      name: 'Open Collaborators Sidebar Leaf',
+      callback: async () => {
+        await this.activatePeerSidebar();
+      },
+    });
+
+    this.addCommand({
+      id: 'kurotsuki-history',
+      name: 'Open Sync & Conflict History Inspector',
+      callback: () => {
+        new HistoryInspectorModal(this.app, this).open();
       },
     });
 
@@ -137,16 +187,20 @@ export default class KurotsukiSyncPlugin extends Plugin {
       editorCallback: async (editor: Editor, view: MarkdownView) => {
         const file = view.file;
         if (file) {
+          if (this.syncEngine.isReadOnly()) {
+            new Notice('🔒 Cannot sync: Vault is in Read-Only (Viewer) mode');
+            return;
+          }
           await this.syncEngine.onLocalFileModified(file);
           new Notice(`Kurotsuki Sync: Synced ${file.name}`);
         }
       },
     });
 
-    // 11. Add Settings Tab
+    // 12. Add Settings Tab
     this.addSettingTab(new KurotsukiSettingTab(this.app, this));
 
-    // 12. Connect if auto-connect enabled
+    // 13. Connect if auto-connect enabled
     if (this.settings.autoConnect && this.settings.serverUrl) {
       this.wsClient.connect();
     }
@@ -161,6 +215,37 @@ export default class KurotsukiSyncPlugin extends Plugin {
     this.awareness.destroy();
   }
 
+  public async activatePeerSidebar(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = null;
+    const leaves = workspace.getLeavesOfType(VIEW_TYPE_KUROTSUKI_PEERS);
+
+    if (leaves.length > 0) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      if (leaf) {
+        await leaf.setViewState({
+          type: VIEW_TYPE_KUROTSUKI_PEERS,
+          active: true,
+        });
+      }
+    }
+
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
+
+  private notifyReadOnlyAttempt(): void {
+    const now = Date.now();
+    // Debounce notice so it doesn't spam on repeated key presses
+    if (now - this.lastReadOnlyNoticeTime > 3000) {
+      this.lastReadOnlyNoticeTime = now;
+      new Notice('🔒 Read-Only Note: You are connected as Viewer. Modifications cannot be saved.', 3500);
+    }
+  }
+
   private broadcastLocalAwareness(): void {
     const local = this.awareness.getLocalState();
     this.wsClient.send({
@@ -173,15 +258,22 @@ export default class KurotsukiSyncPlugin extends Plugin {
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass('kurotsuki-status-bar');
 
-    const updateBar = (status: ConnectionStatus) => {
+    const updateBar = () => {
       this.statusBarEl.empty();
+      const status = this.wsClient.getStatus();
+      const role = this.wsClient.getCurrentRole();
+      const latency = this.wsClient.getLatency();
+
       const dot = this.statusBarEl.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
       const currentFile = this.app.workspace.getActiveFile();
       const peersInFile = currentFile ? this.awareness.getActivePeersForFile(currentFile.path).length : 0;
 
       let label = 'Kurotsuki';
       if (status === 'connected') {
-        label = peersInFile > 0 ? `Kurotsuki (${peersInFile + 1} 👤)` : 'Kurotsuki (Connected)';
+        const peerCount = peersInFile > 0 ? ` (${peersInFile + 1} 👤)` : '';
+        const roleTag = role === 'viewer' ? ' [🔒 Viewer]' : '';
+        const pingTag = latency !== null ? ` • ${latency}ms` : '';
+        label = `Kurotsuki${roleTag}${peerCount}${pingTag}`;
       } else if (status === 'connecting') {
         label = 'Kurotsuki (Connecting...)';
       } else if (status === 'error') {
@@ -193,12 +285,33 @@ export default class KurotsukiSyncPlugin extends Plugin {
       this.statusBarEl.createSpan({ text: label });
     };
 
-    this.wsClient.onStatusChange(updateBar);
-    this.awareness.subscribe(() => updateBar(this.wsClient.getStatus()));
+    this.wsClient.onStatusChange((status) => {
+      updateBar();
+      if (status === 'connected') {
+        this.syncEngine.reconcileVault();
+      }
+    });
+    this.wsClient.onLatencyChange(updateBar);
+    this.wsClient.onRoleChange(updateBar);
+    this.awareness.subscribe(updateBar);
 
     this.statusBarEl.onclick = () => {
-      new StatusModal(this.app, this.settings, this.wsClient, this.awareness).open();
+      new StatusModal(this.app, this).open();
     };
+  }
+
+  public updateEditorReadOnlyState(readOnly: boolean): void {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof MarkdownView && leaf.view.editor) {
+        // @ts-ignore
+        const cm = (leaf.view.editor as any).cm;
+        if (cm && typeof cm.dispatch === 'function') {
+          cm.dispatch({
+            effects: [setReadOnlyEffect.of(readOnly)],
+          });
+        }
+      }
+    });
   }
 
   async loadSettings() {

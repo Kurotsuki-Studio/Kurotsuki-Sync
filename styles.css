@@ -34,6 +34,35 @@
   border-radius: 2px;
 }
 
+/* Prominent CodeMirror 6 Read-Only Banner */
+.kurotsuki-editor-readonly-banner {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(245, 158, 11, 0.15));
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: var(--text-normal);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  user-select: none;
+}
+
+.kurotsuki-banner-icon {
+  font-size: 1.1em;
+}
+
+.kurotsuki-banner-title {
+  font-weight: 700;
+  color: #ef4444;
+}
+
+.kurotsuki-banner-desc {
+  color: var(--text-muted);
+}
+
 /* Status Bar & Indicators */
 .kurotsuki-status-bar {
   display: inline-flex;
@@ -80,34 +109,96 @@
   100% { transform: scale(0.9); opacity: 0.7; }
 }
 
-/* Peer Avatars Stack in Active Note */
-.kurotsuki-peer-stack {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-right: 8px;
-}
-
-.kurotsuki-peer-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  font-size: 11px;
+/* Role Badges */
+.kurotsuki-role-badge {
+  font-size: 10px;
   font-weight: 700;
-  color: white;
-  border: 2px solid var(--background-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  cursor: default;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
 }
 
-/* Modals */
+.kurotsuki-role-admin {
+  background-color: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.kurotsuki-role-editor {
+  background-color: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.kurotsuki-role-viewer {
+  background-color: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.kurotsuki-role-unknown {
+  background-color: var(--background-modifier-border);
+  color: var(--text-dim);
+}
+
+/* Modals & Quick Action Grid */
 .kurotsuki-modal {
-  max-width: 580px;
+  max-width: 600px;
 }
 
+.kurotsuki-modal-desc {
+  color: var(--text-muted);
+  font-size: 0.9em;
+  margin-bottom: 14px;
+}
+
+.kurotsuki-modal-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.kurotsuki-action-card {
+  padding: 10px 12px;
+  font-size: 0.85em;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.kurotsuki-action-card:hover {
+  background-color: var(--background-modifier-hover);
+  border-color: var(--text-accent);
+}
+
+.kurotsuki-details-box {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background-color: var(--background-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.88em;
+}
+
+.kurotsuki-warning-card {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background-color: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
+  color: var(--text-normal);
+  font-size: 0.88em;
+}
+
+/* Peer List */
 .kurotsuki-peer-list {
   margin-top: 12px;
   display: flex;
@@ -151,4 +242,293 @@
   border-radius: 4px;
   background: var(--background-modifier-border);
   color: var(--text-muted);
+}
+
+/* Collaborator Sidebar View */
+.kurotsuki-sidebar-view {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kurotsuki-sidebar-header {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kurotsuki-sidebar-room-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kurotsuki-sidebar-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.kurotsuki-meta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kurotsuki-sidebar-section-title {
+  font-size: 0.82em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.kurotsuki-sidebar-peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kurotsuki-peer-sidebar-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  transition: border-color 0.15s ease;
+}
+
+.kurotsuki-peer-sidebar-card:hover {
+  border-color: var(--text-accent);
+}
+
+.kurotsuki-peer-sidebar-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: bold;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.kurotsuki-peer-sidebar-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.kurotsuki-peer-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kurotsuki-peer-name {
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.kurotsuki-peer-note-row {
+  font-size: 0.82em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kurotsuki-note-link {
+  color: var(--text-accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.kurotsuki-note-link:hover {
+  text-decoration: underline;
+}
+
+.kurotsuki-peer-idle {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.kurotsuki-peer-cursor-info {
+  font-size: 0.75em;
+  font-family: monospace;
+  color: var(--text-muted);
+}
+
+/* Vault Profile Cards */
+.kurotsuki-vault-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.kurotsuki-profile-card {
+  padding: 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kurotsuki-profile-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+.kurotsuki-profile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kurotsuki-profile-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kurotsuki-badge-active {
+  font-size: 10px;
+  font-weight: bold;
+  background: var(--interactive-accent);
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.kurotsuki-profile-meta {
+  font-size: 0.82em;
+  color: var(--text-muted);
+}
+
+.kurotsuki-profile-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* History Inspector */
+.kurotsuki-history-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 0.88em;
+  color: var(--text-muted);
+}
+
+.kurotsuki-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.kurotsuki-history-item {
+  padding: 10px 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.88em;
+}
+
+.kurotsuki-hist-conflict_detected {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.kurotsuki-history-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kurotsuki-badge-type {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.kurotsuki-type-conflict_detected {
+  background: #f59e0b;
+  color: white;
+}
+
+.kurotsuki-type-remote_update {
+  background: #3b82f6;
+  color: white;
+}
+
+.kurotsuki-type-local_update {
+  background: #10b981;
+  color: white;
+}
+
+.kurotsuki-type-file_event {
+  background: #8b5cf6;
+  color: white;
+}
+
+.kurotsuki-type-error {
+  background: #ef4444;
+  color: white;
+}
+
+.kurotsuki-history-time {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
+.kurotsuki-history-path {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
+/* Settings Banner */
+.kurotsuki-settings-banner {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 18px;
+}
+
+.kurotsuki-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9em;
+}
+
+.kurotsuki-banner-subnotice {
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: #f59e0b;
+  font-weight: 500;
 }

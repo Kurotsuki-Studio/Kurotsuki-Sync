@@ -32,7 +32,7 @@ __export(main_exports, {
   default: () => KurotsukiSyncPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/awareness.ts
 var AwarenessManager = class {
@@ -105,6 +105,9 @@ var AwarenessManager = class {
   getAllRemotePeers() {
     return Array.from(this.remotePeers.values());
   }
+  getAllPeers() {
+    return this.getAllRemotePeers();
+  }
   subscribe(listener) {
     this.listeners.add(listener);
     listener(this.getAllRemotePeers());
@@ -140,7 +143,20 @@ var AwarenessManager = class {
 
 // src/cm6-collab.ts
 var import_state = require("@codemirror/state");
+var import_state2 = require("@codemirror/state");
 var import_view = require("@codemirror/view");
+var remoteSyncAnnotation = import_state.Annotation.define();
+var setReadOnlyEffect = import_state.StateEffect.define();
+var readOnlyField = import_state.StateField.define({
+  create: () => false,
+  update: (val, tr) => {
+    for (const effect of tr.effects) {
+      if (effect.is(setReadOnlyEffect))
+        return effect.value;
+    }
+    return val;
+  }
+});
 var RemoteCursorWidget = class extends import_view.WidgetType {
   constructor(user) {
     super();
@@ -165,19 +181,124 @@ var RemoteCursorWidget = class extends import_view.WidgetType {
     return true;
   }
 };
-function createCollabExtension(awareness, getActiveFilePath, getYDocForPath) {
-  const cursorPlugin = import_view.ViewPlugin.fromClass(
+function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isReadOnly = () => false, onReadOnlyAttempt) {
+  const collabPlugin = import_view.ViewPlugin.fromClass(
     class {
       constructor(view) {
+        this.view = view;
         this.unsubscribeAwareness = null;
+        this.bannerEl = null;
+        this.boundPath = null;
+        this.currentYText = null;
+        this.yTextObserver = null;
+        this.isDispatchingRemote = false;
         this.decorations = this.buildDecorations(view);
         this.unsubscribeAwareness = awareness.subscribe(() => {
           view.requestMeasure();
         });
+        this.updateBanner(view);
+        this.syncReadOnlyState(view);
+        this.bindActiveYDoc();
+      }
+      syncReadOnlyState(view) {
+        const readOnly = isReadOnly();
+        if (view.state.field(readOnlyField) !== readOnly) {
+          queueMicrotask(() => {
+            if (view.state.field(readOnlyField) !== isReadOnly()) {
+              view.dispatch({
+                effects: [setReadOnlyEffect.of(isReadOnly())]
+              });
+            }
+          });
+        }
+      }
+      bindActiveYDoc() {
+        const path = getActiveFilePath();
+        if (path === this.boundPath && this.currentYText)
+          return;
+        if (this.currentYText && this.yTextObserver) {
+          this.currentYText.unobserve(this.yTextObserver);
+        }
+        this.boundPath = path;
+        if (!path) {
+          this.currentYText = null;
+          this.yTextObserver = null;
+          return;
+        }
+        const doc2 = getYDocForPath(path);
+        if (!doc2)
+          return;
+        const yText = doc2.getText("content");
+        this.currentYText = yText;
+        const localText = this.view.state.doc.toString();
+        if (yText.length === 0 && localText.length > 0) {
+          doc2.transact(() => {
+            yText.insert(0, localText);
+          }, "cm6-init");
+        } else if (yText.length > 0 && yText.toString() !== localText) {
+          const yString = yText.toString();
+          this.isDispatchingRemote = true;
+          this.view.dispatch({
+            changes: { from: 0, to: localText.length, insert: yString },
+            annotations: [remoteSyncAnnotation.of(true)]
+          });
+          this.isDispatchingRemote = false;
+        }
+        this.yTextObserver = (event) => {
+          if (event.transaction.origin === "cm6")
+            return;
+          let index = 0;
+          const changes = [];
+          for (const d of event.delta) {
+            if (d.retain) {
+              index += d.retain;
+            }
+            if (d.delete) {
+              changes.push({ from: index, to: index + d.delete });
+            }
+            if (d.insert) {
+              const str = typeof d.insert === "string" ? d.insert : "";
+              changes.push({ from: index, to: index, insert: str });
+              index += str.length;
+            }
+          }
+          if (changes.length > 0) {
+            this.isDispatchingRemote = true;
+            this.view.dispatch({
+              changes,
+              annotations: [remoteSyncAnnotation.of(true)]
+            });
+            this.isDispatchingRemote = false;
+          }
+        };
+        yText.observe(this.yTextObserver);
       }
       update(update) {
+        this.bindActiveYDoc();
+        this.syncReadOnlyState(update.view);
         if (update.docChanged || update.viewportChanged || update.selectionSet) {
           this.decorations = this.buildDecorations(update.view);
+        }
+        if (update.docChanged && !this.isDispatchingRemote) {
+          const isRemote = update.transactions.some((tr) => tr.annotation(remoteSyncAnnotation));
+          if (!isRemote && this.currentYText && !isReadOnly()) {
+            const yText = this.currentYText;
+            const doc2 = yText.doc;
+            if (doc2) {
+              update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+                const insertStr = inserted.toString();
+                const deleteLen = toA - fromA;
+                doc2.transact(() => {
+                  if (deleteLen > 0) {
+                    yText.delete(fromA, deleteLen);
+                  }
+                  if (insertStr.length > 0) {
+                    yText.insert(fromA, insertStr);
+                  }
+                }, "cm6");
+              });
+            }
+          }
         }
         if (update.selectionSet) {
           const main = update.state.selection.main;
@@ -186,11 +307,38 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath) {
             head: main.head
           });
         }
+        this.updateBanner(update.view);
+      }
+      updateBanner(view) {
+        const readOnly = isReadOnly();
+        const parent = view.dom;
+        if (readOnly) {
+          if (!this.bannerEl) {
+            this.bannerEl = document.createElement("div");
+            this.bannerEl.className = "kurotsuki-editor-readonly-banner";
+            this.bannerEl.innerHTML = `
+              <span class="kurotsuki-banner-icon">\u{1F512}</span>
+              <span class="kurotsuki-banner-title">READ-ONLY VAULT:</span>
+              <span class="kurotsuki-banner-desc">You are connected as Viewer. All document edits and local saves are blocked.</span>
+            `;
+            parent.insertBefore(this.bannerEl, parent.firstChild);
+          }
+        } else if (this.bannerEl) {
+          this.bannerEl.remove();
+          this.bannerEl = null;
+        }
       }
       destroy() {
+        if (this.currentYText && this.yTextObserver) {
+          this.currentYText.unobserve(this.yTextObserver);
+        }
         if (this.unsubscribeAwareness) {
           this.unsubscribeAwareness();
           this.unsubscribeAwareness = null;
+        }
+        if (this.bannerEl) {
+          this.bannerEl.remove();
+          this.bannerEl = null;
         }
       }
       buildDecorations(view) {
@@ -248,12 +396,176 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath) {
       decorations: (v) => v.decorations
     }
   );
-  return [cursorPlugin];
+  const readOnlyFacet = import_state2.EditorState.readOnly.compute([readOnlyField], (state) => {
+    return state.field(readOnlyField);
+  });
+  const editableFacet = import_view.EditorView.editable.compute([readOnlyField], (state) => {
+    return !state.field(readOnlyField);
+  });
+  const changeFilter = import_state2.EditorState.changeFilter.of((tr) => {
+    if (tr.annotation(remoteSyncAnnotation)) {
+      return true;
+    }
+    if (isReadOnly() && tr.docChanged) {
+      if (onReadOnlyAttempt)
+        onReadOnlyAttempt();
+      return false;
+    }
+    return true;
+  });
+  const transactionFilter = import_state2.EditorState.transactionFilter.of((tr) => {
+    if (tr.annotation(remoteSyncAnnotation)) {
+      return tr;
+    }
+    if (isReadOnly() && tr.docChanged) {
+      if (onReadOnlyAttempt)
+        onReadOnlyAttempt();
+      return [];
+    }
+    return tr;
+  });
+  return [readOnlyField, collabPlugin, readOnlyFacet, editableFacet, changeFilter, transactionFilter];
 }
 
 // src/settings.ts
+var import_obsidian2 = require("obsidian");
+
+// src/ui/vault-switcher-modal.ts
 var import_obsidian = require("obsidian");
-var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
+var VaultSwitcherModal = class extends import_obsidian.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    this.render();
+  }
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("kurotsuki-modal");
+    contentEl.createEl("h2", { text: "\u{1F504} Switch Vault / Room Profile" });
+    contentEl.createEl("p", {
+      text: "Seamlessly switch synchronization to another shared Kurotsuki workspace or relay room.",
+      cls: "kurotsuki-modal-desc"
+    });
+    const profiles = this.plugin.settings.vaultProfiles || [];
+    const activeId = this.plugin.settings.activeProfileId || (profiles[0] ? profiles[0].id : "");
+    const listEl = contentEl.createDiv({ cls: "kurotsuki-vault-profile-list" });
+    if (profiles.length === 0) {
+      listEl.createDiv({
+        cls: "kurotsuki-empty-state",
+        text: "No saved vault profiles yet. Add one below!"
+      });
+    }
+    profiles.forEach((profile) => {
+      const isActive = profile.id === activeId;
+      const card = listEl.createDiv({
+        cls: `kurotsuki-profile-card ${isActive ? "kurotsuki-profile-active" : ""}`
+      });
+      const header = card.createDiv({ cls: "kurotsuki-profile-header" });
+      const titleWrapper = header.createDiv({ cls: "kurotsuki-profile-title" });
+      titleWrapper.createSpan({
+        cls: `kurotsuki-status-dot ${isActive ? "kurotsuki-status-connected" : "kurotsuki-status-offline"}`
+      });
+      titleWrapper.createEl("strong", { text: profile.name || profile.vaultId });
+      if (isActive) {
+        header.createSpan({ cls: "kurotsuki-badge-active", text: "CURRENT" });
+      }
+      const meta = card.createDiv({ cls: "kurotsuki-profile-meta" });
+      meta.createDiv({ text: `Room: ${profile.vaultId}` });
+      meta.createDiv({ text: `Server: ${profile.serverUrl}` });
+      const actions = card.createDiv({ cls: "kurotsuki-profile-actions" });
+      if (!isActive) {
+        const switchBtn = actions.createEl("button", {
+          text: "Switch To This Vault",
+          cls: "mod-cta"
+        });
+        switchBtn.onclick = async () => {
+          await this.switchToProfile(profile);
+        };
+      }
+      if (profiles.length > 1) {
+        const deleteBtn = actions.createEl("button", {
+          text: "Remove",
+          cls: "mod-warning"
+        });
+        deleteBtn.onclick = async () => {
+          this.plugin.settings.vaultProfiles = this.plugin.settings.vaultProfiles.filter(
+            (p) => p.id !== profile.id
+          );
+          await this.plugin.saveSettings();
+          this.render();
+        };
+      }
+    });
+    contentEl.createEl("h3", { text: "\u2795 Add Vault Profile", cls: "kurotsuki-section-header" });
+    let newName = "";
+    let newVaultId = "";
+    let newServerUrl = this.plugin.settings.serverUrl || "ws://localhost:3000";
+    let newAuthToken = "";
+    new import_obsidian.Setting(contentEl).setName("Profile Name").setDesc("Friendly label for this workspace profile").addText(
+      (text2) => text2.setPlaceholder("e.g. Engineering Collab").onChange((val) => {
+        newName = val.trim();
+      })
+    );
+    new import_obsidian.Setting(contentEl).setName("Vault / Room ID").setDesc("Relay room identifier on the server").addText(
+      (text2) => text2.setPlaceholder("e.g. team-engineering").onChange((val) => {
+        newVaultId = val.trim();
+      })
+    );
+    new import_obsidian.Setting(contentEl).setName("Relay Server URL").setDesc("WebSocket server address").addText(
+      (text2) => text2.setValue(newServerUrl).onChange((val) => {
+        newServerUrl = val.trim();
+      })
+    );
+    new import_obsidian.Setting(contentEl).setName("Authentication Secret / Token").setDesc("Token assigned for this vault (or viewer token)").addText(
+      (text2) => text2.setPlaceholder("kuro_...").onChange((val) => {
+        newAuthToken = val.trim();
+      })
+    );
+    new import_obsidian.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText("Save Profile").setCta().onClick(async () => {
+        if (!newVaultId) {
+          new import_obsidian.Notice("Please specify a Vault / Room ID");
+          return;
+        }
+        const newProfile = {
+          id: "prof_" + Math.random().toString(36).substring(2, 9),
+          name: newName || newVaultId,
+          vaultId: newVaultId,
+          serverUrl: newServerUrl,
+          authToken: newAuthToken
+        };
+        this.plugin.settings.vaultProfiles.push(newProfile);
+        await this.plugin.saveSettings();
+        new import_obsidian.Notice(`Added profile "${newProfile.name}"`);
+        this.render();
+      })
+    );
+  }
+  async switchToProfile(profile) {
+    this.plugin.settings.activeProfileId = profile.id;
+    this.plugin.settings.vaultId = profile.vaultId;
+    this.plugin.settings.serverUrl = profile.serverUrl;
+    this.plugin.settings.authToken = profile.authToken;
+    await this.plugin.saveSettings();
+    this.plugin.syncEngine.resetDocs();
+    this.plugin.syncEngine.updateSettings(this.plugin.settings);
+    this.plugin.wsClient.updateSettings(this.plugin.settings);
+    this.plugin.wsClient.disconnect(false);
+    this.plugin.wsClient.connect();
+    new import_obsidian.Notice(`\u{1F319} Switched to Vault: ${profile.name || profile.vaultId}`);
+    this.close();
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+};
+
+// src/settings.ts
+var KurotsukiSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -266,26 +578,50 @@ var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
       text: "Configure your self-hosted relay server, collaboration profile, and synchronization scope.",
       attr: { style: "color: var(--text-muted);" }
     });
+    const role = this.plugin.wsClient.getCurrentRole();
+    const status = this.plugin.wsClient.getStatus();
+    const latency = this.plugin.wsClient.getLatency();
+    const banner = containerEl.createDiv({ cls: "kurotsuki-settings-banner" });
+    const bannerRow = banner.createDiv({ cls: "kurotsuki-banner-row" });
+    bannerRow.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+    bannerRow.createEl("strong", { text: `Relay Status: ${status.toUpperCase()}` });
+    bannerRow.createSpan({
+      cls: `kurotsuki-role-badge kurotsuki-role-${role}`,
+      text: `ROLE: ${role.toUpperCase()}`
+    });
+    if (latency !== null) {
+      bannerRow.createSpan({ text: ` \u2022 Ping: ${latency}ms` });
+    }
+    if (role === "viewer") {
+      const viewerNotice = banner.createDiv({ cls: "kurotsuki-banner-subnotice" });
+      viewerNotice.textContent = "\u{1F512} Read-Only Active: Editor changes in Obsidian are locked and local saves will not overwrite the relay.";
+    }
+    containerEl.createEl("h3", { text: "\u{1F5C2}\uFE0F Multi-Vault & Room Profiles" });
+    new import_obsidian2.Setting(containerEl).setName("Manage Vault Profiles").setDesc("Configure and switch between multiple remote rooms and vaults").addButton(
+      (btn) => btn.setButtonText("Switch / Edit Profiles").setCta().onClick(() => {
+        new VaultSwitcherModal(this.app, this.plugin).open();
+      })
+    );
     containerEl.createEl("h3", { text: "\u{1F310} Server Connection" });
-    new import_obsidian.Setting(containerEl).setName("Relay Server URL").setDesc("WebSocket or HTTP URL of your self-hosted Kurotsuki Relay server (e.g. ws://localhost:3000 or wss://relay.yourdomain.com)").addText(
+    new import_obsidian2.Setting(containerEl).setName("Relay Server URL").setDesc("WebSocket or HTTP URL of your self-hosted Kurotsuki Relay server (e.g. ws://localhost:3000 or wss://relay.yourdomain.com)").addText(
       (text2) => text2.setPlaceholder("ws://localhost:3000").setValue(this.plugin.settings.serverUrl).onChange(async (val) => {
         this.plugin.settings.serverUrl = val.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Authentication Secret / Token").setDesc("Secret token required by your relay server (leave empty if your server does not require authentication)").addText(
+    new import_obsidian2.Setting(containerEl).setName("Authentication Secret / Token").setDesc("Secret token required by your relay server (leave empty if your server does not require authentication)").addText(
       (text2) => text2.setPlaceholder("my-secret-token").setValue(this.plugin.settings.authToken).onChange(async (val) => {
         this.plugin.settings.authToken = val.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Vault / Room ID").setDesc("Unique identifier for this shared workspace / vault room").addText(
+    new import_obsidian2.Setting(containerEl).setName("Vault / Room ID").setDesc("Unique identifier for this shared workspace / vault room").addText(
       (text2) => text2.setPlaceholder("default-vault").setValue(this.plugin.settings.vaultId).onChange(async (val) => {
         this.plugin.settings.vaultId = val.trim() || "default-vault";
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Test Connection").setDesc("Verify communication with the configured Kurotsuki server").addButton(
+    new import_obsidian2.Setting(containerEl).setName("Test Connection").setDesc("Verify communication with the configured Kurotsuki server").addButton(
       (btn) => btn.setButtonText("Test Now").setCta().onClick(async () => {
         btn.setDisabled(true);
         btn.setButtonText("Testing...");
@@ -295,14 +631,22 @@ var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
             httpBase = "http://" + httpBase;
           }
           const res = await fetch(`${httpBase}/api/v1/health`);
-          if (res.ok) {
-            const data = await res.json();
-            new import_obsidian.Notice(`\u2705 Connected! Server: ${data.name || "Kurotsuki Relay"} (v${data.version || "1.0.0"})`);
-          } else {
-            new import_obsidian.Notice(`\u26A0\uFE0F Server returned HTTP ${res.status}`);
+          if (!res.ok) {
+            new import_obsidian2.Notice(`\u26A0\uFE0F Le serveur ne r\xE9pond pas (HTTP ${res.status})`);
+            return;
           }
+          const statsRes = await fetch(`${httpBase}/api/v1/stats`, {
+            headers: { Authorization: `Bearer ${this.plugin.settings.authToken}` }
+          });
+          if (statsRes.status === 401) {
+            new import_obsidian2.Notice("\u274C Token / Mot de passe incorrect ! Le serveur refuse la connexion.");
+            return;
+          }
+          new import_obsidian2.Notice("\u2705 Connexion et mot de passe valid\xE9s !");
+          this.plugin.wsClient.disconnect(false);
+          this.plugin.wsClient.connect();
         } catch (err) {
-          new import_obsidian.Notice(`\u274C Connection failed: ${err.message || "Cannot reach server"}`);
+          new import_obsidian2.Notice(`\u274C Connection failed: ${err.message || "Cannot reach server"}`);
         } finally {
           btn.setDisabled(false);
           btn.setButtonText("Test Now");
@@ -310,14 +654,14 @@ var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     containerEl.createEl("h3", { text: "\u{1F464} Collaborator Profile" });
-    new import_obsidian.Setting(containerEl).setName("Display Name").setDesc("Your nickname visible to other collaborators on active notes").addText(
+    new import_obsidian2.Setting(containerEl).setName("Display Name").setDesc("Your nickname visible to other collaborators on active notes").addText(
       (text2) => text2.setPlaceholder("Your Name").setValue(this.plugin.settings.userName).onChange(async (val) => {
         this.plugin.settings.userName = val.trim() || "Obsidian User";
         this.plugin.awareness.updateUserProfile({ name: this.plugin.settings.userName });
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("User Color").setDesc("Color of your live cursor and avatar badge").addColorPicker(
+    new import_obsidian2.Setting(containerEl).setName("User Color").setDesc("Color of your live cursor and avatar badge").addColorPicker(
       (color) => color.setValue(this.plugin.settings.userColor).onChange(async (val) => {
         this.plugin.settings.userColor = val;
         this.plugin.awareness.updateUserProfile({ color: val });
@@ -325,7 +669,7 @@ var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     containerEl.createEl("h3", { text: "\u{1F4C2} Synchronization Scope" });
-    new import_obsidian.Setting(containerEl).setName("Sync Mode").setDesc("Choose whether to sync your whole vault or only designated folders (like Relay Selective Sync)").addDropdown(
+    new import_obsidian2.Setting(containerEl).setName("Sync Mode").setDesc("Choose whether to sync your whole vault or only designated folders (like Relay Selective Sync)").addDropdown(
       (dropdown) => dropdown.addOption("entire_vault", "Entire Vault").addOption("selective", "Selective Shared Folders").setValue(this.plugin.settings.syncMode).onChange(async (val) => {
         this.plugin.settings.syncMode = val;
         await this.plugin.saveSettings();
@@ -333,26 +677,26 @@ var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     if (this.plugin.settings.syncMode === "selective") {
-      new import_obsidian.Setting(containerEl).setName("Shared Folders").setDesc("Comma-separated list of folder paths to synchronize (e.g. Shared, Team/Notes, Work)").addTextArea(
+      new import_obsidian2.Setting(containerEl).setName("Shared Folders").setDesc("Comma-separated list of folder paths to synchronize (e.g. Shared, Team/Notes, Work)").addTextArea(
         (text2) => text2.setPlaceholder("Shared, Projects/Collab").setValue(this.plugin.settings.sharedFolders.join(", ")).onChange(async (val) => {
           this.plugin.settings.sharedFolders = val.split(",").map((f) => f.trim()).filter((f) => f.length > 0);
           await this.plugin.saveSettings();
         })
       );
     }
-    new import_obsidian.Setting(containerEl).setName("Sync Attachments").setDesc("Automatically synchronize images and media assets").addToggle(
+    new import_obsidian2.Setting(containerEl).setName("Sync Attachments").setDesc("Automatically synchronize images and media assets").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncAttachments).onChange(async (val) => {
         this.plugin.settings.syncAttachments = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Show Live Remote Cursors").setDesc("Display real-time cursor positions and collaborator tags in CodeMirror 6").addToggle(
+    new import_obsidian2.Setting(containerEl).setName("Show Live Remote Cursors").setDesc("Display real-time cursor positions and collaborator tags in CodeMirror 6").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableLiveCursors).onChange(async (val) => {
         this.plugin.settings.enableLiveCursors = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Auto-connect on Startup").setDesc("Automatically connect to the relay server when Obsidian launches").addToggle(
+    new import_obsidian2.Setting(containerEl).setName("Auto-connect on Startup").setDesc("Automatically connect to the relay server when Obsidian launches").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.autoConnect).onChange(async (val) => {
         this.plugin.settings.autoConnect = val;
         await this.plugin.saveSettings();
@@ -362,7 +706,7 @@ var KurotsukiSettingTab = class extends import_obsidian.PluginSettingTab {
 };
 
 // src/sync-engine.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // node_modules/lib0/map.js
 var create = () => /* @__PURE__ */ new Map();
@@ -1272,6 +1616,7 @@ var callAll = (fs, args2, i = 0) => {
     }
   }
 };
+var id = (a) => a;
 var equalityDeep = (a, b) => {
   if (a === b) {
     return true;
@@ -2431,6 +2776,29 @@ var addToDeleteSet = (ds, client, clock, length2) => {
   )).push(new DeleteItem(clock, length2));
 };
 var createDeleteSet = () => new DeleteSet();
+var createDeleteSetFromStructStore = (ss) => {
+  const ds = createDeleteSet();
+  ss.clients.forEach((structs, client) => {
+    const dsitems = [];
+    for (let i = 0; i < structs.length; i++) {
+      const struct = structs[i];
+      if (struct.deleted) {
+        const clock = struct.id.clock;
+        let len = struct.length;
+        if (i + 1 < structs.length) {
+          for (let next = structs[i + 1]; i + 1 < structs.length && next.deleted; next = structs[++i + 1]) {
+            len += next.length;
+          }
+        }
+        dsitems.push(new DeleteItem(clock, len));
+      }
+    }
+    if (dsitems.length > 0) {
+      ds.clients.set(client, dsitems);
+    }
+  });
+  return ds;
+};
 var writeDeleteSet = (encoder, ds) => {
   writeVarUint(encoder.restEncoder, ds.clients.size);
   from(ds.clients.entries()).sort((a, b) => b[0] - a[0]).forEach(([client, dsitems]) => {
@@ -3529,6 +3897,41 @@ var applyUpdateV2 = (ydoc, update, transactionOrigin, YDecoder = UpdateDecoderV2
   readUpdateV2(decoder, ydoc, transactionOrigin, new YDecoder(decoder));
 };
 var applyUpdate = (ydoc, update, transactionOrigin) => applyUpdateV2(ydoc, update, transactionOrigin, UpdateDecoderV1);
+var writeStateAsUpdate = (encoder, doc2, targetStateVector = /* @__PURE__ */ new Map()) => {
+  writeClientsStructs(encoder, doc2.store, targetStateVector);
+  writeDeleteSet(encoder, createDeleteSetFromStructStore(doc2.store));
+};
+var encodeStateAsUpdateV2 = (doc2, encodedTargetStateVector = new Uint8Array([0]), encoder = new UpdateEncoderV2()) => {
+  const targetStateVector = decodeStateVector(encodedTargetStateVector);
+  writeStateAsUpdate(encoder, doc2, targetStateVector);
+  const updates = [encoder.toUint8Array()];
+  if (doc2.store.pendingDs) {
+    updates.push(doc2.store.pendingDs);
+  }
+  if (doc2.store.pendingStructs) {
+    updates.push(diffUpdateV2(doc2.store.pendingStructs.update, encodedTargetStateVector));
+  }
+  if (updates.length > 1) {
+    if (encoder.constructor === UpdateEncoderV1) {
+      return mergeUpdates(updates.map((update, i) => i === 0 ? update : convertUpdateFormatV2ToV1(update)));
+    } else if (encoder.constructor === UpdateEncoderV2) {
+      return mergeUpdatesV2(updates);
+    }
+  }
+  return updates[0];
+};
+var encodeStateAsUpdate = (doc2, encodedTargetStateVector) => encodeStateAsUpdateV2(doc2, encodedTargetStateVector, new UpdateEncoderV1());
+var readStateVector = (decoder) => {
+  const ss = /* @__PURE__ */ new Map();
+  const ssLength = readVarUint(decoder.restDecoder);
+  for (let i = 0; i < ssLength; i++) {
+    const client = readVarUint(decoder.restDecoder);
+    const clock = readVarUint(decoder.restDecoder);
+    ss.set(client, clock);
+  }
+  return ss;
+};
+var decodeStateVector = (decodedState) => readStateVector(new DSDecoderV1(createDecoder(decodedState)));
 var EventHandler = class {
   constructor() {
     this.l = [];
@@ -4027,6 +4430,7 @@ var LazyStructWriter = class {
     this.clientStructs = [];
   }
 };
+var mergeUpdates = (updates) => mergeUpdatesV2(updates, UpdateDecoderV1, UpdateEncoderV1);
 var sliceStruct = (left, diff) => {
   if (left.constructor === GC) {
     const { client, clock } = left.id;
@@ -4156,6 +4560,38 @@ var mergeUpdatesV2 = (updates, YDecoder = UpdateDecoderV2, YEncoder = UpdateEnco
   writeDeleteSet(updateEncoder, ds);
   return updateEncoder.toUint8Array();
 };
+var diffUpdateV2 = (update, sv, YDecoder = UpdateDecoderV2, YEncoder = UpdateEncoderV2) => {
+  const state = decodeStateVector(sv);
+  const encoder = new YEncoder();
+  const lazyStructWriter = new LazyStructWriter(encoder);
+  const decoder = new YDecoder(createDecoder(update));
+  const reader = new LazyStructReader(decoder, false);
+  while (reader.curr) {
+    const curr = reader.curr;
+    const currClient = curr.id.client;
+    const svClock = state.get(currClient) || 0;
+    if (reader.curr.constructor === Skip) {
+      reader.next();
+      continue;
+    }
+    if (curr.id.clock + curr.length > svClock) {
+      writeStructToLazyStructWriter(lazyStructWriter, curr, max(svClock - curr.id.clock, 0));
+      reader.next();
+      while (reader.curr && reader.curr.id.client === currClient) {
+        writeStructToLazyStructWriter(lazyStructWriter, reader.curr, 0);
+        reader.next();
+      }
+    } else {
+      while (reader.curr && reader.curr.id.client === currClient && reader.curr.id.clock + reader.curr.length <= svClock) {
+        reader.next();
+      }
+    }
+  }
+  finishLazyStructWriting(lazyStructWriter);
+  const ds = readDeleteSet(decoder);
+  writeDeleteSet(encoder, ds);
+  return encoder.toUint8Array();
+};
 var flushLazyStructWriter = (lazyWriter) => {
   if (lazyWriter.written > 0) {
     lazyWriter.clientStructs.push({ written: lazyWriter.written, restEncoder: toUint8Array(lazyWriter.encoder.restEncoder) });
@@ -4185,6 +4621,20 @@ var finishLazyStructWriting = (lazyWriter) => {
     writeUint8Array(restEncoder, partStructs.restEncoder);
   }
 };
+var convertUpdateFormat = (update, blockTransformer, YDecoder, YEncoder) => {
+  const updateDecoder = new YDecoder(createDecoder(update));
+  const lazyDecoder = new LazyStructReader(updateDecoder, false);
+  const updateEncoder = new YEncoder();
+  const lazyWriter = new LazyStructWriter(updateEncoder);
+  for (let curr = lazyDecoder.curr; curr !== null; curr = lazyDecoder.next()) {
+    writeStructToLazyStructWriter(lazyWriter, blockTransformer(curr), 0);
+  }
+  finishLazyStructWriting(lazyWriter);
+  const ds = readDeleteSet(updateDecoder);
+  writeDeleteSet(updateEncoder, ds);
+  return updateEncoder.toUint8Array();
+};
+var convertUpdateFormatV2ToV1 = (update) => convertUpdateFormat(update, id, UpdateDecoderV2, UpdateEncoderV1);
 var errorComputeChanges = "You must not compute changes after the event-handler fired.";
 var YEvent = class {
   /**
@@ -8653,12 +9103,33 @@ if (glo[importIdentifier] === true) {
 }
 glo[importIdentifier] = true;
 
+// src/utils.ts
+function uint8ArrayToBase64(bytes) {
+  let binary = "";
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+function base64ToUint8Array(base64) {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
 // src/sync-engine.ts
 var SyncEngine = class {
   constructor(app, settings, wsClient) {
     this.docs = /* @__PURE__ */ new Map();
     this.remoteUpdateLocks = /* @__PURE__ */ new Map();
     this.pendingLocalDebounce = /* @__PURE__ */ new Map();
+    this.historyLogs = [];
+    this.lastUpdatePerFile = /* @__PURE__ */ new Map();
     this.app = app;
     this.settings = settings;
     this.wsClient = wsClient;
@@ -8666,6 +9137,9 @@ var SyncEngine = class {
   }
   updateSettings(settings) {
     this.settings = settings;
+  }
+  isReadOnly() {
+    return this.settings.currentRole === "viewer";
   }
   shouldSync(path) {
     if (!path)
@@ -8695,7 +9169,17 @@ var SyncEngine = class {
       doc2.on("update", (update, origin) => {
         if (origin === "remote" || origin === "internal")
           return;
+        if (this.isReadOnly()) {
+          console.warn(`[Kurotsuki] Sync blocked: Vault is in read-only mode for ${path}`);
+          return;
+        }
         const b64 = uint8ArrayToBase64(update);
+        this.recordHistory({
+          type: "local_update",
+          path,
+          sizeBytes: update.length,
+          summary: `Sent local CRDT update (${update.length} bytes)`
+        });
         this.wsClient.send({
           type: "yjs_sync",
           path,
@@ -8718,6 +9202,9 @@ var SyncEngine = class {
       return;
     if (this.isLocked(file.path))
       return;
+    if (this.isReadOnly()) {
+      return;
+    }
     if (file.extension === "md" || file.extension === "txt" || file.extension === "canvas") {
       const content = await this.app.vault.read(file);
       const doc2 = this.getOrCreateDoc(file.path);
@@ -8733,16 +9220,50 @@ var SyncEngine = class {
       await this.syncAttachment(file);
     }
   }
+  getSyncedFilesMap() {
+    if (!this.settings.syncedFiles) {
+      this.settings.syncedFiles = {};
+    }
+    return this.settings.syncedFiles;
+  }
+  trackSyncedFile(path) {
+    const map2 = this.getSyncedFilesMap();
+    map2[path] = Date.now();
+  }
+  untrackSyncedFile(path) {
+    const map2 = this.getSyncedFilesMap();
+    delete map2[path];
+  }
+  isAttachmentPath(path) {
+    const ext = path.split(".").pop()?.toLowerCase();
+    return ext !== "md" && ext !== "txt" && ext !== "canvas";
+  }
   async onLocalFileCreated(file) {
     if (!this.shouldSync(file.path))
       return;
     if (this.isLocked(file.path))
       return;
-    if (file instanceof import_obsidian2.TFile) {
+    if (this.isReadOnly())
+      return;
+    if (file instanceof import_obsidian3.TFile) {
       if (file.extension === "md" || file.extension === "txt" || file.extension === "canvas") {
         const content = await this.app.vault.read(file);
-        this.getOrCreateDoc(file.path, content);
+        const doc2 = this.getOrCreateDoc(file.path, content);
+        const state = encodeStateAsUpdate(doc2);
+        this.wsClient.send({
+          type: "yjs_sync",
+          path: file.path,
+          update: uint8ArrayToBase64(state)
+        });
+      } else if (this.settings.syncAttachments) {
+        await this.syncAttachment(file);
       }
+      this.trackSyncedFile(file.path);
+      this.recordHistory({
+        type: "file_event",
+        path: file.path,
+        summary: `Created file ${file.name}`
+      });
       this.wsClient.send({
         type: "file_event",
         action: "create",
@@ -8756,7 +9277,15 @@ var SyncEngine = class {
       return;
     if (this.isLocked(file.path))
       return;
+    if (this.isReadOnly())
+      return;
     this.removeDoc(file.path);
+    this.untrackSyncedFile(file.path);
+    this.recordHistory({
+      type: "file_event",
+      path: file.path,
+      summary: `Deleted file ${file.name}`
+    });
     this.wsClient.send({
       type: "file_event",
       action: "delete",
@@ -8769,11 +9298,20 @@ var SyncEngine = class {
       return;
     if (this.isLocked(file.path) || this.isLocked(oldPath))
       return;
+    if (this.isReadOnly())
+      return;
     const doc2 = this.docs.get(oldPath);
     if (doc2) {
       this.docs.delete(oldPath);
       this.docs.set(file.path, doc2);
     }
+    this.untrackSyncedFile(oldPath);
+    this.trackSyncedFile(file.path);
+    this.recordHistory({
+      type: "file_event",
+      path: file.path,
+      summary: `Renamed file from ${oldPath} to ${file.path}`
+    });
     this.wsClient.send({
       type: "file_event",
       action: "rename",
@@ -8790,8 +9328,139 @@ var SyncEngine = class {
       case "file_event":
         this.handleRemoteFileEvent(msg);
         break;
+      case "file_list_response":
+        this.handleFileListResponse(msg.files);
+        break;
+      case "doc_response":
+        this.handleDocResponse(msg.path, msg.update);
+        break;
+      case "error":
+        this.recordHistory({
+          type: "error",
+          path: "",
+          summary: `Server Error: ${msg.message}`
+        });
+        if (msg.code === "ERR_READONLY") {
+          new import_obsidian3.Notice("\u{1F512} Read-Only: Edit rejected by server.", 4e3);
+        }
+        break;
       default:
         break;
+    }
+  }
+  reconcileVault() {
+    if (this.wsClient.getStatus() === "connected") {
+      this.wsClient.send({
+        type: "file_list_request"
+      });
+    }
+  }
+  async handleFileListResponse(remoteFiles) {
+    const remotePaths = new Set(remoteFiles.map((f) => f.path));
+    const synced = this.getSyncedFilesMap();
+    for (const rf of remoteFiles) {
+      if (!this.shouldSync(rf.path))
+        continue;
+      const localFile = this.app.vault.getAbstractFileByPath(rf.path);
+      if (!localFile) {
+        if (synced[rf.path] && !this.isReadOnly()) {
+          this.untrackSyncedFile(rf.path);
+          this.wsClient.send({
+            type: "file_event",
+            action: "delete",
+            path: rf.path,
+            mtime: Date.now()
+          });
+        } else {
+          this.trackSyncedFile(rf.path);
+          if (rf.isAttachment || this.isAttachmentPath(rf.path)) {
+            await this.downloadAttachment(rf.path);
+          } else {
+            this.wsClient.send({
+              type: "doc_request",
+              path: rf.path
+            });
+          }
+        }
+      } else {
+        this.trackSyncedFile(rf.path);
+        if (!rf.isAttachment && !this.isAttachmentPath(rf.path)) {
+          this.wsClient.send({
+            type: "doc_request",
+            path: rf.path
+          });
+        }
+      }
+    }
+    const localFiles = this.app.vault.getFiles();
+    for (const file of localFiles) {
+      if (!this.shouldSync(file.path))
+        continue;
+      if (!remotePaths.has(file.path)) {
+        if (!this.isReadOnly()) {
+          if (synced[file.path]) {
+            this.untrackSyncedFile(file.path);
+            this.lockPath(file.path, 2e3);
+            await this.app.vault.delete(file);
+          } else {
+            this.trackSyncedFile(file.path);
+            if (this.isAttachmentPath(file.path)) {
+              if (this.settings.syncAttachments) {
+                await this.syncAttachment(file);
+              }
+            } else {
+              const content = await this.app.vault.read(file);
+              const doc2 = this.getOrCreateDoc(file.path, content);
+              const state = encodeStateAsUpdate(doc2);
+              this.wsClient.send({
+                type: "file_event",
+                action: "create",
+                path: file.path,
+                mtime: file.stat.mtime
+              });
+              this.wsClient.send({
+                type: "yjs_sync",
+                path: file.path,
+                update: uint8ArrayToBase64(state)
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  async handleDocResponse(path, updateB64) {
+    if (!this.shouldSync(path))
+      return;
+    const update = base64ToUint8Array(updateB64);
+    const doc2 = this.getOrCreateDoc(path);
+    applyUpdate(doc2, update, "remote");
+    this.trackSyncedFile(path);
+    const content = doc2.getText("content").toString();
+    await this.writeToVaultSafely(path, content);
+  }
+  async downloadAttachment(relativePath) {
+    try {
+      let httpBase = this.settings.serverUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
+      const url = `${httpBase}/api/v1/attachments/${encodeURIComponent(this.settings.vaultId)}/${encodeURIComponent(relativePath)}`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${this.settings.authToken}`
+        }
+      });
+      if (res.ok) {
+        const arrayBuffer = await res.arrayBuffer();
+        this.lockPath(relativePath, 2e3);
+        await this.ensureFolderExists(relativePath);
+        const existing = this.app.vault.getAbstractFileByPath(relativePath);
+        if (existing instanceof import_obsidian3.TFile) {
+          await this.app.vault.modifyBinary(existing, arrayBuffer);
+        } else if (!existing) {
+          await this.app.vault.createBinary(relativePath, arrayBuffer);
+        }
+      }
+    } catch (e) {
+      console.error(`[Kurotsuki] Error downloading attachment ${relativePath}:`, e);
     }
   }
   async handleRemoteYjsSync(path, updateB64) {
@@ -8799,6 +9468,24 @@ var SyncEngine = class {
       return;
     const update = base64ToUint8Array(updateB64);
     const doc2 = this.getOrCreateDoc(path);
+    const now = Date.now();
+    const last2 = this.lastUpdatePerFile.get(path);
+    if (last2 && now - last2.timestamp < 2e3) {
+      this.recordHistory({
+        type: "conflict_detected",
+        path,
+        sizeBytes: update.length,
+        summary: `Concurrent CRDT edits resolved seamlessly for ${path}`
+      });
+    } else {
+      this.recordHistory({
+        type: "remote_update",
+        path,
+        sizeBytes: update.length,
+        summary: `Received remote CRDT sync (${update.length} bytes)`
+      });
+    }
+    this.lastUpdatePerFile.set(path, { timestamp: now });
     applyUpdate(doc2, update, "remote");
     this.debounceDiskWrite(path, doc2);
   }
@@ -8818,7 +9505,7 @@ var SyncEngine = class {
     const abstractFile = this.app.vault.getAbstractFileByPath(path);
     this.lockPath(path, 1500);
     try {
-      if (abstractFile instanceof import_obsidian2.TFile) {
+      if (abstractFile instanceof import_obsidian3.TFile) {
         const currentContent = await this.app.vault.read(abstractFile);
         if (currentContent !== content) {
           await this.app.vault.modify(abstractFile, content);
@@ -8842,11 +9529,17 @@ var SyncEngine = class {
     this.lockPath(path, 2e3);
     if (oldPath)
       this.lockPath(oldPath, 2e3);
+    this.recordHistory({
+      type: "file_event",
+      path,
+      summary: `Remote file event: ${action} on ${path}`
+    });
     try {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (action === "delete") {
         if (file) {
           this.removeDoc(path);
+          this.untrackSyncedFile(path);
           await this.app.vault.delete(file);
         }
       } else if (action === "rename" && oldPath) {
@@ -8857,7 +9550,19 @@ var SyncEngine = class {
             this.docs.delete(oldPath);
             this.docs.set(path, doc2);
           }
+          this.untrackSyncedFile(oldPath);
+          this.trackSyncedFile(path);
           await this.app.fileManager.renameFile(oldFile, path);
+        }
+      } else if (action === "create" || action === "modify") {
+        this.trackSyncedFile(path);
+        if (this.isAttachmentPath(path)) {
+          await this.downloadAttachment(path);
+        } else {
+          this.wsClient.send({
+            type: "doc_request",
+            path
+          });
         }
       }
     } catch (err) {
@@ -8865,6 +9570,8 @@ var SyncEngine = class {
     }
   }
   async syncAttachment(file) {
+    if (this.isReadOnly())
+      return;
     const maxBytes = (this.settings.maxAttachmentSizeMB || 20) * 1024 * 1024;
     if (file.stat.size > maxBytes) {
       console.warn(`[Kurotsuki] Skipping attachment ${file.path}: size exceeds limit (${file.stat.size} bytes)`);
@@ -8874,7 +9581,7 @@ var SyncEngine = class {
       const buffer = await this.app.vault.readBinary(file);
       let httpBase = this.settings.serverUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
       const url = `${httpBase}/api/v1/attachments/${encodeURIComponent(this.settings.vaultId)}/${encodeURIComponent(file.path)}`;
-      await fetch(url, {
+      const res = await fetch(url, {
         method: "PUT",
         headers: {
           "Authorization": `Bearer ${this.settings.authToken}`,
@@ -8882,6 +9589,11 @@ var SyncEngine = class {
         },
         body: buffer
       });
+      if (!res.ok) {
+        if (res.status === 403) {
+          new import_obsidian3.Notice("\u{1F512} Read-Only: Attachment upload blocked by server.");
+        }
+      }
     } catch (err) {
       console.error(`[Kurotsuki] Failed to sync attachment ${file.path}:`, err);
     }
@@ -8913,7 +9625,24 @@ var SyncEngine = class {
     }
     return true;
   }
-  destroy() {
+  recordHistory(entry) {
+    const item = {
+      id: "hist_" + Math.random().toString(36).substring(2, 9),
+      timestamp: Date.now(),
+      ...entry
+    };
+    this.historyLogs.unshift(item);
+    if (this.historyLogs.length > 200) {
+      this.historyLogs = this.historyLogs.slice(0, 200);
+    }
+  }
+  getHistoryLogs() {
+    return this.historyLogs;
+  }
+  clearHistory() {
+    this.historyLogs = [];
+  }
+  resetDocs() {
     for (const timer of this.pendingLocalDebounce.values()) {
       window.clearTimeout(timer);
     }
@@ -8923,6 +9652,9 @@ var SyncEngine = class {
     }
     this.docs.clear();
     this.remoteUpdateLocks.clear();
+  }
+  destroy() {
+    this.resetDocs();
   }
 };
 
@@ -8938,12 +9670,226 @@ var DEFAULT_SETTINGS = {
   syncAttachments: true,
   maxAttachmentSizeMB: 20,
   autoConnect: true,
-  enableLiveCursors: true
+  enableLiveCursors: true,
+  currentRole: "unknown",
+  syncedFiles: {},
+  vaultProfiles: [
+    {
+      id: "default-profile",
+      name: "Default Workspace",
+      serverUrl: "ws://localhost:3000",
+      vaultId: "default-vault",
+      authToken: "",
+      role: "editor"
+    }
+  ],
+  activeProfileId: "default-profile"
+};
+
+// src/ui/history-inspector-modal.ts
+var import_obsidian4 = require("obsidian");
+var HistoryInspectorModal = class extends import_obsidian4.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    this.render();
+  }
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("kurotsuki-modal");
+    contentEl.createEl("h2", { text: "\u{1F4DC} Sync & Conflict History Inspector" });
+    contentEl.createEl("p", {
+      text: "Audit trail of recent CRDT document syncs, detected concurrent updates, and file events.",
+      cls: "kurotsuki-modal-desc"
+    });
+    const logs = this.plugin.syncEngine.getHistoryLogs();
+    const bar = contentEl.createDiv({ cls: "kurotsuki-history-bar" });
+    bar.createSpan({ text: `Total Recorded Events: ${logs.length}` });
+    const clearBtn = bar.createEl("button", { text: "Clear Log", cls: "mod-warning" });
+    clearBtn.onclick = () => {
+      this.plugin.syncEngine.clearHistory();
+      new import_obsidian4.Notice("History log cleared");
+      this.render();
+    };
+    const container = contentEl.createDiv({ cls: "kurotsuki-history-list" });
+    if (logs.length === 0) {
+      container.createDiv({
+        cls: "kurotsuki-empty-state",
+        text: "No synchronization events recorded in this session yet."
+      });
+      return;
+    }
+    for (const log of logs) {
+      const item = container.createDiv({
+        cls: `kurotsuki-history-item kurotsuki-hist-${log.type}`
+      });
+      const topRow = item.createDiv({ cls: "kurotsuki-history-top" });
+      const typeBadge = topRow.createSpan({
+        cls: `kurotsuki-badge-type kurotsuki-type-${log.type}`
+      });
+      if (log.type === "conflict_detected") {
+        typeBadge.textContent = "\u26A1 CONCURRENT RESOLVED";
+      } else if (log.type === "remote_update") {
+        typeBadge.textContent = "\u{1F4E5} REMOTE SYNC";
+      } else if (log.type === "local_update") {
+        typeBadge.textContent = "\u{1F4E4} LOCAL EDIT";
+      } else if (log.type === "file_event") {
+        typeBadge.textContent = "\u{1F4C1} FILE EVENT";
+      } else {
+        typeBadge.textContent = "\u26A0\uFE0F ERROR";
+      }
+      const timeStr = new Date(log.timestamp).toLocaleTimeString();
+      topRow.createSpan({ cls: "kurotsuki-history-time", text: timeStr });
+      item.createDiv({ cls: "kurotsuki-history-summary", text: log.summary });
+      if (log.path) {
+        item.createDiv({ cls: "kurotsuki-history-path", text: `Path: ${log.path}` });
+      }
+    }
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+};
+
+// src/ui/peer-sidebar-view.ts
+var import_obsidian5 = require("obsidian");
+var VIEW_TYPE_KUROTSUKI_PEERS = "kurotsuki-peer-view";
+var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.unsubscribeAwareness = null;
+    this.unsubscribeLatency = null;
+    this.unsubscribeRole = null;
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return VIEW_TYPE_KUROTSUKI_PEERS;
+  }
+  getDisplayText() {
+    return "Kurotsuki Collaborators";
+  }
+  getIcon() {
+    return "users";
+  }
+  async onOpen() {
+    this.unsubscribeAwareness = this.plugin.awareness.subscribe(() => {
+      this.render();
+    });
+    this.unsubscribeLatency = this.plugin.wsClient.onLatencyChange(() => {
+      this.renderHeaderStats();
+    });
+    this.unsubscribeRole = this.plugin.wsClient.onRoleChange(() => {
+      this.render();
+    });
+    this.render();
+  }
+  async onClose() {
+    if (this.unsubscribeAwareness) {
+      this.unsubscribeAwareness();
+      this.unsubscribeAwareness = null;
+    }
+    if (this.unsubscribeLatency) {
+      this.unsubscribeLatency();
+      this.unsubscribeLatency = null;
+    }
+    if (this.unsubscribeRole) {
+      this.unsubscribeRole();
+      this.unsubscribeRole = null;
+    }
+  }
+  render() {
+    const container = this.containerEl.children[1];
+    if (!container)
+      return;
+    container.empty();
+    container.addClass("kurotsuki-sidebar-view");
+    const headerEl = container.createDiv({ cls: "kurotsuki-sidebar-header" });
+    this.renderHeaderContent(headerEl);
+    const allPeers = this.plugin.awareness.getAllPeers();
+    const countEl = container.createDiv({ cls: "kurotsuki-sidebar-section-title" });
+    countEl.createSpan({ text: `Online Collaborators (${allPeers.length + 1})` });
+    const listEl = container.createDiv({ cls: "kurotsuki-sidebar-peer-list" });
+    const localUser = this.plugin.awareness.getLocalState();
+    this.renderPeerItem(listEl, localUser, true);
+    for (const peer of allPeers) {
+      this.renderPeerItem(listEl, peer, false);
+    }
+  }
+  renderHeaderStats() {
+    const statPill = this.containerEl.querySelector(".kurotsuki-header-latency");
+    if (statPill) {
+      const latency = this.plugin.wsClient.getLatency();
+      statPill.textContent = latency !== null ? `${latency}ms` : "--";
+    }
+  }
+  renderHeaderContent(headerEl) {
+    headerEl.empty();
+    const titleRow = headerEl.createDiv({ cls: "kurotsuki-sidebar-room-row" });
+    const roomSpan = titleRow.createDiv({ cls: "kurotsuki-room-info" });
+    roomSpan.createSpan({ text: "\u{1F319} " });
+    roomSpan.createEl("strong", { text: this.plugin.settings.vaultId });
+    const role = this.plugin.wsClient.getCurrentRole();
+    const roleBadge = titleRow.createSpan({
+      cls: `kurotsuki-role-badge kurotsuki-role-${role}`,
+      text: role.toUpperCase()
+    });
+    const metaRow = headerEl.createDiv({ cls: "kurotsuki-sidebar-meta-row" });
+    const status = this.plugin.wsClient.getStatus();
+    const latency = this.plugin.wsClient.getLatency();
+    const statusPill = metaRow.createSpan({ cls: "kurotsuki-meta-pill" });
+    statusPill.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+    statusPill.createSpan({ text: status === "connected" ? "Connected" : status });
+    const latencyPill = metaRow.createSpan({ cls: "kurotsuki-meta-pill" });
+    latencyPill.createSpan({ text: "\u{1F4F6} " });
+    latencyPill.createSpan({
+      cls: "kurotsuki-header-latency",
+      text: latency !== null ? `${latency}ms` : "--"
+    });
+  }
+  renderPeerItem(container, state, isSelf) {
+    const card = container.createDiv({
+      cls: `kurotsuki-peer-sidebar-card ${isSelf ? "kurotsuki-peer-self" : ""}`
+    });
+    const avatar = card.createDiv({ cls: "kurotsuki-peer-sidebar-avatar" });
+    avatar.style.backgroundColor = state.user.color || "#3b82f6";
+    avatar.textContent = (state.user.name || "?").charAt(0).toUpperCase();
+    const body = card.createDiv({ cls: "kurotsuki-peer-sidebar-body" });
+    const nameRow = body.createDiv({ cls: "kurotsuki-peer-name-row" });
+    nameRow.createEl("span", { cls: "kurotsuki-peer-name", text: state.user.name });
+    if (isSelf) {
+      nameRow.createSpan({ cls: "kurotsuki-badge-self", text: "You" });
+    }
+    const noteRow = body.createDiv({ cls: "kurotsuki-peer-note-row" });
+    if (state.activeFile) {
+      const fileLink = noteRow.createEl("a", {
+        cls: "kurotsuki-note-link",
+        text: `\u{1F4C4} ${state.activeFile}`
+      });
+      fileLink.onclick = async (e) => {
+        e.preventDefault();
+        if (state.activeFile) {
+          await this.app.workspace.openLinkText(state.activeFile, "", false);
+        }
+      };
+    } else {
+      noteRow.createSpan({ cls: "kurotsuki-peer-idle", text: "Idle (no note opened)" });
+    }
+    if (state.cursor) {
+      body.createDiv({
+        cls: "kurotsuki-peer-cursor-info",
+        text: `pos: ${state.cursor.head}`
+      });
+    }
+  }
 };
 
 // src/ui/share-modal.ts
-var import_obsidian3 = require("obsidian");
-var ShareModal = class extends import_obsidian3.Modal {
+var import_obsidian6 = require("obsidian");
+var ShareModal = class extends import_obsidian6.Modal {
   constructor(app, settings, currentPath) {
     super(app);
     this.settings = settings;
@@ -8982,12 +9928,12 @@ var ShareModal = class extends import_obsidian3.Modal {
     const copyBtn = buttonRow.createEl("button", { text: "\u{1F4CB} Copy Invite Link", cls: "mod-cta" });
     copyBtn.onclick = async () => {
       await navigator.clipboard.writeText(inviteLink);
-      new import_obsidian3.Notice("Invite link copied to clipboard!");
+      new import_obsidian6.Notice("Invite link copied to clipboard!");
     };
     const copyCodeBtn = buttonRow.createEl("button", { text: "Copy Raw Code" });
     copyCodeBtn.onclick = async () => {
       await navigator.clipboard.writeText(inviteCode);
-      new import_obsidian3.Notice("Raw invite code copied!");
+      new import_obsidian6.Notice("Raw invite code copied!");
     };
   }
   onClose() {
@@ -8997,58 +9943,96 @@ var ShareModal = class extends import_obsidian3.Modal {
 };
 
 // src/ui/status-modal.ts
-var import_obsidian4 = require("obsidian");
-var StatusModal = class extends import_obsidian4.Modal {
-  constructor(app, settings, wsClient, awareness) {
+var import_obsidian7 = require("obsidian");
+var StatusModal = class extends import_obsidian7.Modal {
+  constructor(app, plugin) {
     super(app);
     this.unsubscribeStatus = null;
     this.unsubscribeAwareness = null;
-    this.settings = settings;
-    this.wsClient = wsClient;
-    this.awareness = awareness;
+    this.unsubscribeLatency = null;
+    this.plugin = plugin;
   }
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("kurotsuki-modal");
     this.render();
-    this.unsubscribeStatus = this.wsClient.onStatusChange(() => this.render());
-    this.unsubscribeAwareness = this.awareness.subscribe(() => this.render());
+    this.unsubscribeStatus = this.plugin.wsClient.onStatusChange(() => this.render());
+    this.unsubscribeAwareness = this.plugin.awareness.subscribe(() => this.render());
+    this.unsubscribeLatency = this.plugin.wsClient.onLatencyChange(() => this.render());
   }
   onClose() {
     if (this.unsubscribeStatus)
       this.unsubscribeStatus();
     if (this.unsubscribeAwareness)
       this.unsubscribeAwareness();
+    if (this.unsubscribeLatency)
+      this.unsubscribeLatency();
     const { contentEl } = this;
     contentEl.empty();
   }
   render() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "\u{1F319} Kurotsuki Sync Status" });
-    const status = this.wsClient.getStatus();
+    contentEl.createEl("h2", { text: "\u{1F319} Kurotsuki Sync Dashboard" });
+    const status = this.plugin.wsClient.getStatus();
+    const role = this.plugin.wsClient.getCurrentRole();
+    const latency = this.plugin.wsClient.getLatency();
     const statusBox = contentEl.createDiv({ cls: "kurotsuki-peer-item" });
     const statusLeft = statusBox.createDiv({ cls: "kurotsuki-peer-info" });
-    const dot = statusLeft.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+    statusLeft.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
     statusLeft.createSpan({ text: `Status: ${status.toUpperCase()}`, attr: { style: "font-weight: 600;" } });
+    statusLeft.createSpan({
+      cls: `kurotsuki-role-badge kurotsuki-role-${role}`,
+      text: role.toUpperCase()
+    });
     const actionBtn = statusBox.createEl("button", {
       text: status === "connected" ? "Disconnect" : "Connect"
     });
     actionBtn.onclick = () => {
       if (status === "connected") {
-        this.wsClient.disconnect(true);
+        this.plugin.wsClient.disconnect(true);
       } else {
-        this.wsClient.connect();
+        this.plugin.wsClient.connect();
       }
     };
-    const details = contentEl.createDiv({ attr: { style: "margin-top: 14px; font-size: 0.9em; display: flex; flex-direction: column; gap: 6px;" } });
-    details.createDiv({ text: `\u{1F310} Server: ${this.settings.serverUrl}` });
-    details.createDiv({ text: `\u{1F4C1} Vault / Room ID: ${this.settings.vaultId}` });
-    details.createDiv({ text: `\u{1F504} Sync Mode: ${this.settings.syncMode === "entire_vault" ? "Entire Vault" : "Selective Folders"}` });
-    contentEl.createEl("h3", { text: "\u{1F465} Active Collaborators", attr: { style: "margin-top: 18px;" } });
-    const local = this.awareness.getLocalState();
-    const remotePeers = this.awareness.getAllRemotePeers();
+    const actionGrid = contentEl.createDiv({ cls: "kurotsuki-modal-actions-grid" });
+    const switchBtn = actionGrid.createEl("button", {
+      text: "\u{1F504} Switch Vault Profile",
+      cls: "kurotsuki-action-card"
+    });
+    switchBtn.onclick = () => {
+      this.close();
+      new VaultSwitcherModal(this.app, this.plugin).open();
+    };
+    const sidebarBtn = actionGrid.createEl("button", {
+      text: "\u{1F465} Open Peer Sidebar",
+      cls: "kurotsuki-action-card"
+    });
+    sidebarBtn.onclick = async () => {
+      this.close();
+      await this.plugin.activatePeerSidebar();
+    };
+    const histBtn = actionGrid.createEl("button", {
+      text: "\u{1F4DC} Sync & Conflict History",
+      cls: "kurotsuki-action-card"
+    });
+    histBtn.onclick = () => {
+      this.close();
+      new HistoryInspectorModal(this.app, this.plugin).open();
+    };
+    const details = contentEl.createDiv({ cls: "kurotsuki-details-box" });
+    details.createDiv({ text: `\u{1F310} Server: ${this.plugin.settings.serverUrl}` });
+    details.createDiv({ text: `\u{1F4C1} Active Vault / Room: ${this.plugin.settings.vaultId}` });
+    details.createDiv({ text: `\u{1F4F6} Latency: ${latency !== null ? `${latency}ms` : "Measuring..."}` });
+    details.createDiv({ text: `\u{1F504} Sync Mode: ${this.plugin.settings.syncMode === "entire_vault" ? "Entire Vault" : "Selective Folders"}` });
+    if (role === "viewer") {
+      const warningBanner = contentEl.createDiv({ cls: "kurotsuki-warning-card" });
+      warningBanner.innerHTML = "\u{1F512} <strong>Viewer Mode:</strong> You have read-only access. Editor mutations and local saves are blocked.";
+    }
+    contentEl.createEl("h3", { text: "\u{1F465} Online Collaborators", attr: { style: "margin-top: 18px;" } });
+    const local = this.plugin.awareness.getLocalState();
+    const remotePeers = this.plugin.awareness.getAllRemotePeers();
     const peerList = contentEl.createDiv({ cls: "kurotsuki-peer-list" });
     const localItem = peerList.createDiv({ cls: "kurotsuki-peer-item" });
     const localInfo = localItem.createDiv({ cls: "kurotsuki-peer-info" });
@@ -9056,9 +10040,12 @@ var StatusModal = class extends import_obsidian4.Modal {
     localAvatar.style.backgroundColor = local.user.color;
     localAvatar.textContent = local.user.name.charAt(0).toUpperCase();
     localInfo.createSpan({ text: local.user.name, attr: { style: "font-weight: 600;" } });
-    localItem.createSpan({ text: "You (Host)", cls: "kurotsuki-badge-self" });
+    localItem.createSpan({ text: "You", cls: "kurotsuki-badge-self" });
     if (remotePeers.length === 0) {
-      peerList.createEl("p", { text: "No other collaborators currently connected.", attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
+      peerList.createEl("p", {
+        text: "No other collaborators currently connected.",
+        attr: { style: "color: var(--text-muted); font-size: 0.9em;" }
+      });
     } else {
       for (const peer of remotePeers) {
         const item = peerList.createDiv({ cls: "kurotsuki-peer-item" });
@@ -9068,7 +10055,10 @@ var StatusModal = class extends import_obsidian4.Modal {
         avatar.textContent = peer.user.name.charAt(0).toUpperCase();
         const nameSpan = info.createSpan({ text: peer.user.name });
         if (peer.activeFile) {
-          info.createSpan({ text: ` \u2022 ${peer.activeFile}`, attr: { style: "font-size: 0.8em; color: var(--text-muted);" } });
+          info.createSpan({
+            text: ` \u2022 ${peer.activeFile}`,
+            attr: { style: "font-size: 0.8em; color: var(--text-muted);" }
+          });
         }
       }
     }
@@ -9081,13 +10071,19 @@ var KurotsukiWSClient = class {
     this.ws = null;
     this.messageHandlers = /* @__PURE__ */ new Set();
     this.statusHandlers = /* @__PURE__ */ new Set();
+    this.latencyHandlers = /* @__PURE__ */ new Set();
+    this.roleHandlers = /* @__PURE__ */ new Set();
     this.status = "disconnected";
+    this.currentRole = "unknown";
+    this.latency = null;
     this.reconnectTimeout = null;
     this.pingInterval = null;
     this.reconnectAttempts = 0;
     this.manualDisconnect = false;
+    this.lastPingSentAt = null;
     this.settings = settings;
     this.getUserProfile = getUserProfile;
+    this.currentRole = settings.currentRole || "unknown";
   }
   updateSettings(settings) {
     this.settings = settings;
@@ -9095,11 +10091,20 @@ var KurotsukiWSClient = class {
   getStatus() {
     return this.status;
   }
+  getLatency() {
+    return this.latency;
+  }
+  getCurrentRole() {
+    return this.currentRole;
+  }
+  getReconnectAttempts() {
+    return this.reconnectAttempts;
+  }
   connect() {
     this.manualDisconnect = false;
     this.clearTimers();
     if (!this.settings.serverUrl) {
-      this.setStatus("error", "Server URL is not set");
+      this.setStatus("error", "Server URL is not configured");
       return;
     }
     try {
@@ -9122,11 +10127,15 @@ var KurotsukiWSClient = class {
       this.ws.onopen = () => {
         this.reconnectAttempts = 0;
         this.startHeartbeat();
+        const profile = this.getUserProfile();
         this.send({
           type: "auth",
           token: this.settings.authToken,
           vaultId: this.settings.vaultId,
-          clientInfo: this.getUserProfile()
+          clientInfo: {
+            ...profile,
+            role: this.currentRole !== "unknown" ? this.currentRole : void 0
+          }
         });
       };
       this.ws.onmessage = (event) => {
@@ -9135,12 +10144,20 @@ var KurotsukiWSClient = class {
           const msg = JSON.parse(raw);
           if (msg.type === "auth_ack") {
             if (msg.success) {
+              this.currentRole = msg.role || "editor";
+              this.settings.currentRole = this.currentRole;
+              this.emitRole(this.currentRole);
               this.setStatus("connected");
+              this.sendPing();
             } else {
               this.setStatus("error", msg.message || "Authentication failed");
               this.disconnect(true);
             }
           } else if (msg.type === "pong") {
+            const now = Date.now();
+            const sentAt = msg.timestamp || this.lastPingSentAt || now;
+            this.latency = Math.max(1, now - sentAt);
+            this.emitLatency(this.latency);
           } else {
             for (const handler of this.messageHandlers) {
               handler(msg);
@@ -9151,13 +10168,15 @@ var KurotsukiWSClient = class {
         }
       };
       this.ws.onerror = (err) => {
-        console.warn("[Kurotsuki] WebSocket error:", err);
+        console.warn("[Kurotsuki] WebSocket connection error:", err);
       };
-      this.ws.onclose = () => {
+      this.ws.onclose = (event) => {
         this.clearTimers();
         this.ws = null;
+        this.latency = null;
         if (!this.manualDisconnect) {
-          this.setStatus("disconnected", "Disconnected from server");
+          const reason = event.reason ? `: ${event.reason}` : "";
+          this.setStatus("disconnected", `Disconnected${reason}`);
           this.scheduleReconnect();
         } else {
           this.setStatus("disconnected");
@@ -9178,6 +10197,7 @@ var KurotsukiWSClient = class {
       }
       this.ws = null;
     }
+    this.latency = null;
     this.setStatus("disconnected");
   }
   send(msg) {
@@ -9188,9 +10208,16 @@ var KurotsukiWSClient = class {
       this.ws.send(JSON.stringify(msg));
       return true;
     } catch (err) {
-      console.error("[Kurotsuki] Failed to send message:", err);
+      console.error("[Kurotsuki] Failed to send WebSocket message:", err);
       return false;
     }
+  }
+  sendPing() {
+    this.lastPingSentAt = Date.now();
+    this.send({
+      type: "ping",
+      timestamp: this.lastPingSentAt
+    });
   }
   onMessage(handler) {
     this.messageHandlers.add(handler);
@@ -9201,17 +10228,43 @@ var KurotsukiWSClient = class {
     handler(this.status);
     return () => this.statusHandlers.delete(handler);
   }
+  onLatencyChange(handler) {
+    this.latencyHandlers.add(handler);
+    if (this.latency !== null) {
+      handler(this.latency);
+    }
+    return () => this.latencyHandlers.delete(handler);
+  }
+  onRoleChange(handler) {
+    this.roleHandlers.add(handler);
+    handler(this.currentRole);
+    return () => this.roleHandlers.delete(handler);
+  }
   setStatus(status, message) {
     this.status = status;
     for (const handler of this.statusHandlers) {
       handler(status, message);
     }
   }
+  emitLatency(latencyMs) {
+    for (const handler of this.latencyHandlers) {
+      handler(latencyMs);
+    }
+  }
+  emitRole(role) {
+    for (const handler of this.roleHandlers) {
+      handler(role);
+    }
+  }
   scheduleReconnect() {
     if (this.manualDisconnect)
       return;
     this.reconnectAttempts++;
-    const delay = Math.min(1e3 * Math.pow(1.5, this.reconnectAttempts), 15e3);
+    const base = 1e3 * Math.pow(1.6, Math.min(this.reconnectAttempts, 8));
+    const jitter = Math.random() * 800;
+    const delay = Math.min(base + jitter, 3e4);
+    const seconds = Math.ceil(delay / 1e3);
+    this.setStatus("disconnected", `Reconnecting in ${seconds}s (attempt ${this.reconnectAttempts})...`);
     this.reconnectTimeout = window.setTimeout(() => {
       this.connect();
     }, delay);
@@ -9219,9 +10272,9 @@ var KurotsukiWSClient = class {
   startHeartbeat() {
     this.pingInterval = window.setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.send({ type: "ping" });
+        this.sendPing();
       }
-    }, 25e3);
+    }, 1e4);
   }
   clearTimers() {
     if (this.reconnectTimeout !== null) {
@@ -9236,11 +10289,12 @@ var KurotsukiWSClient = class {
 };
 
 // src/main.ts
-var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
+var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.awarenessBroadcastInterval = null;
+    this.lastReadOnlyNoticeTime = 0;
   }
   async onload() {
     await this.loadSettings();
@@ -9253,23 +10307,33 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
     this.wsClient = new KurotsukiWSClient(this.settings, () => ({
       id: initialUser.id,
       name: this.settings.userName,
-      color: this.settings.userColor
+      color: this.settings.userColor,
+      role: this.settings.currentRole
     }));
     this.syncEngine = new SyncEngine(this.app, this.settings, this.wsClient);
     this.registerEditorExtension(
       createCollabExtension(
         this.awareness,
         () => this.app.workspace.getActiveFile()?.path || null,
-        (path) => this.syncEngine.getOrCreateDoc(path)
+        (path) => this.syncEngine.getOrCreateDoc(path),
+        () => this.syncEngine.isReadOnly(),
+        () => this.notifyReadOnlyAttempt()
       )
     );
+    this.registerView(
+      VIEW_TYPE_KUROTSUKI_PEERS,
+      (leaf) => new KurotsukiPeerSidebarView(leaf, this)
+    );
     this.setupStatusBar();
-    this.addRibbonIcon("refresh-cw", "Kurotsuki Sync", () => {
-      new StatusModal(this.app, this.settings, this.wsClient, this.awareness).open();
+    this.addRibbonIcon("refresh-cw", "Kurotsuki Sync Dashboard", () => {
+      new StatusModal(this.app, this).open();
+    });
+    this.addRibbonIcon("users", "Kurotsuki Collaborators", async () => {
+      await this.activatePeerSidebar();
     });
     this.registerEvent(
       this.app.vault.on("modify", async (file) => {
-        if (file instanceof import_obsidian5.TFile) {
+        if (file instanceof import_obsidian8.TFile) {
           await this.syncEngine.onLocalFileModified(file);
         }
       })
@@ -9300,6 +10364,14 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
         this.awareness.handleRemoteAwareness(msg.states);
       }
     });
+    this.wsClient.onRoleChange((role) => {
+      this.settings.currentRole = role;
+      this.syncEngine.updateSettings(this.settings);
+      this.updateEditorReadOnlyState(role === "viewer");
+      if (role === "viewer") {
+        new import_obsidian8.Notice("\u{1F512} Connected as Viewer: Vault is read-only. Editing is disabled.", 5e3);
+      }
+    });
     this.awarenessBroadcastInterval = window.setInterval(() => {
       if (this.wsClient.getStatus() === "connected") {
         this.broadcastLocalAwareness();
@@ -9307,9 +10379,30 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
     }, 3e3);
     this.addCommand({
       id: "kurotsuki-status",
-      name: "View Connection Status & Collaborators",
+      name: "Open Sync Dashboard & Collaborators",
       callback: () => {
-        new StatusModal(this.app, this.settings, this.wsClient, this.awareness).open();
+        new StatusModal(this.app, this).open();
+      }
+    });
+    this.addCommand({
+      id: "kurotsuki-switch-vault",
+      name: "Switch Vault / Room Profile",
+      callback: () => {
+        new VaultSwitcherModal(this.app, this).open();
+      }
+    });
+    this.addCommand({
+      id: "kurotsuki-open-peer-sidebar",
+      name: "Open Collaborators Sidebar Leaf",
+      callback: async () => {
+        await this.activatePeerSidebar();
+      }
+    });
+    this.addCommand({
+      id: "kurotsuki-history",
+      name: "Open Sync & Conflict History Inspector",
+      callback: () => {
+        new HistoryInspectorModal(this.app, this).open();
       }
     });
     this.addCommand({
@@ -9326,7 +10419,7 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
       callback: () => {
         this.wsClient.disconnect(false);
         this.wsClient.connect();
-        new import_obsidian5.Notice("Kurotsuki Sync: Reconnecting...");
+        new import_obsidian8.Notice("Kurotsuki Sync: Reconnecting...");
       }
     });
     this.addCommand({
@@ -9335,8 +10428,12 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
       editorCallback: async (editor, view) => {
         const file = view.file;
         if (file) {
+          if (this.syncEngine.isReadOnly()) {
+            new import_obsidian8.Notice("\u{1F512} Cannot sync: Vault is in Read-Only (Viewer) mode");
+            return;
+          }
           await this.syncEngine.onLocalFileModified(file);
-          new import_obsidian5.Notice(`Kurotsuki Sync: Synced ${file.name}`);
+          new import_obsidian8.Notice(`Kurotsuki Sync: Synced ${file.name}`);
         }
       }
     });
@@ -9353,6 +10450,32 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
     this.syncEngine.destroy();
     this.awareness.destroy();
   }
+  async activatePeerSidebar() {
+    const { workspace } = this.app;
+    let leaf = null;
+    const leaves = workspace.getLeavesOfType(VIEW_TYPE_KUROTSUKI_PEERS);
+    if (leaves.length > 0) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      if (leaf) {
+        await leaf.setViewState({
+          type: VIEW_TYPE_KUROTSUKI_PEERS,
+          active: true
+        });
+      }
+    }
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
+  notifyReadOnlyAttempt() {
+    const now = Date.now();
+    if (now - this.lastReadOnlyNoticeTime > 3e3) {
+      this.lastReadOnlyNoticeTime = now;
+      new import_obsidian8.Notice("\u{1F512} Read-Only Note: You are connected as Viewer. Modifications cannot be saved.", 3500);
+    }
+  }
   broadcastLocalAwareness() {
     const local = this.awareness.getLocalState();
     this.wsClient.send({
@@ -9363,14 +10486,20 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
   setupStatusBar() {
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("kurotsuki-status-bar");
-    const updateBar = (status) => {
+    const updateBar = () => {
       this.statusBarEl.empty();
+      const status = this.wsClient.getStatus();
+      const role = this.wsClient.getCurrentRole();
+      const latency = this.wsClient.getLatency();
       const dot = this.statusBarEl.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
       const currentFile = this.app.workspace.getActiveFile();
       const peersInFile = currentFile ? this.awareness.getActivePeersForFile(currentFile.path).length : 0;
       let label = "Kurotsuki";
       if (status === "connected") {
-        label = peersInFile > 0 ? `Kurotsuki (${peersInFile + 1} \u{1F464})` : "Kurotsuki (Connected)";
+        const peerCount = peersInFile > 0 ? ` (${peersInFile + 1} \u{1F464})` : "";
+        const roleTag = role === "viewer" ? " [\u{1F512} Viewer]" : "";
+        const pingTag = latency !== null ? ` \u2022 ${latency}ms` : "";
+        label = `Kurotsuki${roleTag}${peerCount}${pingTag}`;
       } else if (status === "connecting") {
         label = "Kurotsuki (Connecting...)";
       } else if (status === "error") {
@@ -9380,11 +10509,30 @@ var KurotsukiSyncPlugin = class extends import_obsidian5.Plugin {
       }
       this.statusBarEl.createSpan({ text: label });
     };
-    this.wsClient.onStatusChange(updateBar);
-    this.awareness.subscribe(() => updateBar(this.wsClient.getStatus()));
+    this.wsClient.onStatusChange((status) => {
+      updateBar();
+      if (status === "connected") {
+        this.syncEngine.reconcileVault();
+      }
+    });
+    this.wsClient.onLatencyChange(updateBar);
+    this.wsClient.onRoleChange(updateBar);
+    this.awareness.subscribe(updateBar);
     this.statusBarEl.onclick = () => {
-      new StatusModal(this.app, this.settings, this.wsClient, this.awareness).open();
+      new StatusModal(this.app, this).open();
     };
+  }
+  updateEditorReadOnlyState(readOnly) {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.editor) {
+        const cm = leaf.view.editor.cm;
+        if (cm && typeof cm.dispatch === "function") {
+          cm.dispatch({
+            effects: [setReadOnlyEffect.of(readOnly)]
+          });
+        }
+      }
+    });
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
