@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  kurotsuki-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kurotsuki-sync-relay
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      - STORAGE_DIR=/data
+      - AUTH_TOKEN=${AUTH_TOKEN:-change-me-to-a-secure-secret}
+      - MAX_PAYLOAD_MB=50
+      - CORS_ENABLED=true
+    volumes:
+      - ./data:/data
+
+  # Optional: Automatic SSL Reverse Proxy with Caddy
+  # Uncomment below if you want automated Let's Encrypt HTTPS certificates
+  # caddy:
+  #   image: caddy:alpine
+  #   container_name: kurotsuki-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   environment:
+  #     - DOMAIN=sync.yourdomain.com
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile
+  #     - ./caddy_data:/data
+  #     - ./caddy_config:/config
+  #   depends_on:
+  #     - kurotsuki-relay

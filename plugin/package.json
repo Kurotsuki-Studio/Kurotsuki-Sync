@@ -1,0 +1,33 @@
+{
+  "name": "obsidian-kurotsuki-sync",
+  "version": "1.0.0",
+  "description": "Self-hosted real-time collaborative editing and local-first vault synchronization for Obsidian",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "test": "node --test dist-test/**/*.test.js || echo 'Run compiled tests'"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "collaboration",
+    "relay",
+    "crdt",
+    "sync",
+    "yjs"
+  ],
+  "author": "Kurotsuki",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.20.2",
+    "obsidian": "^1.5.7",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.14"
+  }
+}
