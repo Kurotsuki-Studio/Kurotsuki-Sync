@@ -2,9 +2,9 @@
   "id": "kurotsuki-sync",
   "name": "Kurotsuki Sync",
   "version": "1.1.0",
-  "minAppVersion": "0.15.0",
-  "description": "Self-hosted real-time collaborative editing and local-first vault synchronization for Obsidian (Relay alternative).",
+  "minAppVersion": "1.5.0",
+  "description": "Self-hosted real-time collaborative editing and local-first vault synchronization (Relay alternative).",
   "author": "Kurotsuki",
-  "authorUrl": "https://github.com/Kurotsuki-Sync",
+  "authorUrl": "https://github.com/Kurotsuki-Studio",
   "isDesktopOnly": false
 }

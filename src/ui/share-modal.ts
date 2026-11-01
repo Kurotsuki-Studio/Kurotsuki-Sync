@@ -20,11 +20,11 @@ export class ShareModal extends Modal {
 
     contentEl.createEl('p', {
       text: 'Share your vault or folders with your collaborators in real-time without third-party subscriptions.',
-      attr: { style: 'color: var(--text-muted); margin-bottom: 16px;' },
+      cls: 'kurotsuki-muted-desc',
     });
 
     // Invite Configuration Summary
-    const box = contentEl.createDiv({ cls: 'kurotsuki-peer-item', attr: { style: 'flex-direction: column; align-items: flex-start; gap: 8px;' } });
+    const box = contentEl.createDiv({ cls: 'kurotsuki-peer-item kurotsuki-share-box' });
     box.createDiv({ text: `Server URL: ${this.settings.serverUrl}` });
     box.createDiv({ text: `Vault / Room ID: ${this.settings.vaultId}` });
     if (this.currentPath) {
@@ -40,16 +40,17 @@ export class ShareModal extends Modal {
     const inviteCode = btoa(JSON.stringify(invitePayload));
     const inviteLink = `obsidian://kurotsuki-sync?invite=${encodeURIComponent(inviteCode)}`;
 
-    const linkContainer = contentEl.createDiv({ attr: { style: 'margin-top: 14px;' } });
-    linkContainer.createEl('label', { text: 'Quick Invite Code / Link:', attr: { style: 'font-weight: 600;' } });
+    const linkContainer = contentEl.createDiv({ cls: 'kurotsuki-share-link-container' });
+    linkContainer.createEl('label', { text: 'Quick Invite Code / Link:', cls: 'kurotsuki-bold-label' });
 
-    const input = linkContainer.createEl('input', {
+    linkContainer.createEl('input', {
       type: 'text',
       value: inviteLink,
-      attr: { style: 'width: 100%; margin-top: 6px; padding: 6px;', readonly: 'true' },
+      cls: 'kurotsuki-share-input',
+      attr: { readonly: 'true' },
     });
 
-    const buttonRow = contentEl.createDiv({ attr: { style: 'margin-top: 12px; display: flex; gap: 8px;' } });
+    const buttonRow = contentEl.createDiv({ cls: 'kurotsuki-share-button-row' });
 
     const copyBtn = buttonRow.createEl('button', { text: '📋 Copy Invite Link', cls: 'mod-cta' });
     copyBtn.onclick = async () => {

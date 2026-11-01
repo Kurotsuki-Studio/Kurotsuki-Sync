@@ -88,7 +88,7 @@ export class VaultSwitcherModal extends Modal {
     });
 
     // Add New Profile Section
-    contentEl.createEl('h3', { text: '➕ Add Vault Profile', cls: 'kurotsuki-section-header' });
+    new Setting(contentEl).setName('➕ Add Vault Profile').setHeading();
 
     let newName = '';
     let newVaultId = '';

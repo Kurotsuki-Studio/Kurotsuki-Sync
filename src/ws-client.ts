@@ -99,7 +99,9 @@ export class KurotsukiWSClient {
 
       this.ws.onmessage = (event) => {
         try {
-          const raw = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
+          const raw = typeof event.data === 'string'
+            ? event.data
+            : new TextDecoder().decode(event.data as ArrayBuffer);
           const msg = JSON.parse(raw) as WSMessage;
 
           if (msg.type === 'auth_ack') {
@@ -145,8 +147,9 @@ export class KurotsukiWSClient {
           this.setStatus('disconnected');
         }
       };
-    } catch (err: any) {
-      this.setStatus('error', err?.message || 'Failed to initialize WebSocket');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to initialize WebSocket';
+      this.setStatus('error', msg);
       this.scheduleReconnect();
     }
   }
@@ -157,7 +160,7 @@ export class KurotsukiWSClient {
     if (this.ws) {
       try {
         this.ws.close();
-      } catch (e) {
+      } catch {
         // Ignore close error
       }
       this.ws = null;

@@ -1,6 +1,6 @@
-import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, requestUrl } from 'obsidian';
 import type KurotsukiSyncPlugin from './main';
-import { COLOR_PALETTE, SyncMode } from './types';
+import { SyncMode } from './types';
 import { VaultSwitcherModal } from './ui/vault-switcher-modal';
 
 export class KurotsukiSettingTab extends PluginSettingTab {
@@ -15,11 +15,10 @@ export class KurotsukiSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: '🌙 Kurotsuki Sync Settings' });
-    containerEl.createEl('p', {
-      text: 'Configure your self-hosted relay server, collaboration profile, and synchronization scope.',
-      attr: { style: 'color: var(--text-muted);' },
-    });
+    new Setting(containerEl).setName('🌙 Kurotsuki Sync Settings').setHeading();
+    new Setting(containerEl).setDesc(
+      'Configure your self-hosted relay server, collaboration profile, and synchronization scope.'
+    );
 
     // Role & Connection State Banner
     const role = this.plugin.wsClient.getCurrentRole();
@@ -45,7 +44,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
     }
 
     // Multi-Vault Profiles Header
-    containerEl.createEl('h3', { text: '🗂️ Multi-Vault & Room Profiles' });
+    new Setting(containerEl).setName('🗂️ Multi-Vault & Room Profiles').setHeading();
 
     new Setting(containerEl)
       .setName('Manage Vault Profiles')
@@ -60,7 +59,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       );
 
     // Server Configuration Header
-    containerEl.createEl('h3', { text: '🌐 Server Connection' });
+    new Setting(containerEl).setName('🌐 Server Connection').setHeading();
 
     new Setting(containerEl)
       .setName('Relay Server URL')
@@ -76,11 +75,24 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName('Authentication Secret / Token')
-      .setDesc('Secret token required by your relay server (leave empty if your server does not require authentication)')
+      .setName('Room / Vault ID')
+      .setDesc('Unique identifier for this vault room on the relay server')
       .addText((text) =>
         text
-          .setPlaceholder('my-secret-token')
+          .setPlaceholder('my-obsidian-vault')
+          .setValue(this.plugin.settings.vaultId)
+          .onChange(async (val) => {
+            this.plugin.settings.vaultId = val.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Auth Token / Secret')
+      .setDesc('Optional shared password/token for private relay rooms')
+      .addText((text) =>
+        text
+          .setPlaceholder('Secret token')
           .setValue(this.plugin.settings.authToken)
           .onChange(async (val) => {
             this.plugin.settings.authToken = val.trim();
@@ -89,21 +101,8 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName('Vault / Room ID')
-      .setDesc('Unique identifier for this shared workspace / vault room')
-      .addText((text) =>
-        text
-          .setPlaceholder('default-vault')
-          .setValue(this.plugin.settings.vaultId)
-          .onChange(async (val) => {
-            this.plugin.settings.vaultId = val.trim() || 'default-vault';
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Test Connection')
-      .setDesc('Verify communication with the configured Kurotsuki server')
+      .setName('Test Server Connection')
+      .setDesc('Verify HTTP API reachability, token authentication, and WebSocket connectivity')
       .addButton((btn) =>
         btn
           .setButtonText('Test Now')
@@ -116,13 +115,18 @@ export class KurotsukiSettingTab extends PluginSettingTab {
               if (!httpBase.startsWith('http://') && !httpBase.startsWith('https://')) {
                 httpBase = 'http://' + httpBase;
               }
-              const res = await fetch(`${httpBase}/api/v1/health`);
-              if (!res.ok) {
+              const res = await requestUrl({
+                url: `${httpBase}/api/v1/health`,
+                throw: false,
+              });
+              if (res.status !== 200) {
                 new Notice(`⚠️ Le serveur ne répond pas (HTTP ${res.status})`);
                 return;
               }
-              const statsRes = await fetch(`${httpBase}/api/v1/stats`, {
+              const statsRes = await requestUrl({
+                url: `${httpBase}/api/v1/stats`,
                 headers: { Authorization: `Bearer ${this.plugin.settings.authToken}` },
+                throw: false,
               });
               if (statsRes.status === 401) {
                 new Notice('❌ Token / Mot de passe incorrect ! Le serveur refuse la connexion.');
@@ -131,8 +135,9 @@ export class KurotsukiSettingTab extends PluginSettingTab {
               new Notice('✅ Connexion et mot de passe validés !');
               this.plugin.wsClient.disconnect(false);
               this.plugin.wsClient.connect();
-            } catch (err: any) {
-              new Notice(`❌ Connection failed: ${err.message || 'Cannot reach server'}`);
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : 'Cannot reach server';
+              new Notice(`❌ Connection failed: ${msg}`);
             } finally {
               btn.setDisabled(false);
               btn.setButtonText('Test Now');
@@ -141,7 +146,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       );
 
     // Profile Settings Header
-    containerEl.createEl('h3', { text: '👤 Collaborator Profile' });
+    new Setting(containerEl).setName('👤 Collaborator Profile').setHeading();
 
     new Setting(containerEl)
       .setName('Display Name')
@@ -171,7 +176,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       );
 
     // Sync Scope Header
-    containerEl.createEl('h3', { text: '📂 Synchronization Scope' });
+    new Setting(containerEl).setName('📂 Synchronization Scope').setHeading();
 
     new Setting(containerEl)
       .setName('Sync Mode')
@@ -243,7 +248,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       );
 
     // Vault Push & Synchronization
-    containerEl.createEl('h3', { text: '⚡ Vault Push & Cloud Sync' });
+    new Setting(containerEl).setName('⚡ Vault Push & Cloud Sync').setHeading();
 
     new Setting(containerEl)
       .setName('Push Entire Vault to Server')
@@ -266,9 +271,10 @@ export class KurotsukiSettingTab extends PluginSettingTab {
               });
               notice.hide();
               new Notice(`✅ Coffre envoyé avec succès ! (${res.success} fichiers synchronisés, ${res.failed} erreurs)`, 6000);
-            } catch (err: any) {
+            } catch (err: unknown) {
               notice.hide();
-              new Notice(`❌ Erreur : ${err.message}`);
+              const msg = err instanceof Error ? err.message : String(err);
+              new Notice(`❌ Erreur : ${msg}`);
             } finally {
               btn.setDisabled(false);
               btn.setButtonText('📤 Push Entire Vault Now');

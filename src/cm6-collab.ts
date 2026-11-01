@@ -69,16 +69,16 @@ class RemoteCursorWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const cursor = document.createElement('span');
-    cursor.className = 'cm-kurotsuki-cursor';
-    cursor.style.borderLeftColor = this.user.color || '#3b82f6';
+    const cursor = createSpan({ cls: 'cm-kurotsuki-cursor' });
+    const color = this.user.color || '#3b82f6';
+    cursor.setCssProps({ '--kurotsuki-user-color': color });
 
-    const label = document.createElement('span');
-    label.className = 'cm-kurotsuki-cursor-label';
-    label.style.backgroundColor = this.user.color || '#3b82f6';
-    label.textContent = this.user.name || 'Collaborator';
+    const label = cursor.createSpan({
+      cls: 'cm-kurotsuki-cursor-label',
+      text: this.user.name || 'Collaborator',
+    });
+    label.setCssProps({ '--kurotsuki-user-color': color });
 
-    cursor.appendChild(label);
     return cursor;
   }
 
@@ -307,13 +307,13 @@ export function createCollabExtension(
 
         if (readOnly) {
           if (!this.bannerEl) {
-            this.bannerEl = document.createElement('div');
-            this.bannerEl.className = 'kurotsuki-editor-readonly-banner';
-            this.bannerEl.innerHTML = `
-              <span class="kurotsuki-banner-icon">🔒</span>
-              <span class="kurotsuki-banner-title">READ-ONLY VAULT:</span>
-              <span class="kurotsuki-banner-desc">You are connected as Viewer. All document edits and local saves are blocked.</span>
-            `;
+            this.bannerEl = createDiv({ cls: 'kurotsuki-editor-readonly-banner' });
+            this.bannerEl.createSpan({ cls: 'kurotsuki-banner-icon', text: '🔒' });
+            this.bannerEl.createSpan({ cls: 'kurotsuki-banner-title', text: 'READ-ONLY VAULT:' });
+            this.bannerEl.createSpan({
+              cls: 'kurotsuki-banner-desc',
+              text: 'You are connected as Viewer. All document edits and local saves are blocked.',
+            });
             parent.insertBefore(this.bannerEl, parent.firstChild);
           }
         } else if (this.bannerEl) {
@@ -368,7 +368,7 @@ export function createCollabExtension(
             const markDeco = Decoration.mark({
               class: 'cm-kurotsuki-selection',
               attributes: {
-                style: `background-color: ${hexToRgba(peer.user.color || '#3b82f6', 0.28)} !important;`,
+                style: `--kurotsuki-sel-bg: ${hexToRgba(peer.user.color || '#3b82f6', 0.28)};`,
               },
             });
             ranges.push(markDeco.range(safeFrom, safeTo));

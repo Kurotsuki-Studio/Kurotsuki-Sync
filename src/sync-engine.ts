@@ -1,4 +1,4 @@
-import { App, Notice, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { App, Notice, TAbstractFile, TFile, requestUrl } from 'obsidian';
 import * as Y from 'yjs';
 import { KurotsukiSettings, SyncHistoryEntry, WSMessage } from './types';
 import { base64ToUint8Array, uint8ArrayToBase64 } from './utils';
@@ -37,7 +37,8 @@ export class SyncEngine {
   public shouldSync(path: string): boolean {
     if (!path) return false;
     // Exclude hidden files / system folders
-    if (path.startsWith('.obsidian/') || path.startsWith('.git/') || path.startsWith('.trash/')) {
+    const configDir = (this.app.vault as any).configDir || '.obsidian';
+    if (path.startsWith(configDir + '/') || path.startsWith('.git/') || path.startsWith('.trash/')) {
       return false;
     }
 
@@ -112,7 +113,7 @@ export class SyncEngine {
       }
 
       // Listen for local changes to this doc to transmit to server
-      doc.on('update', (update: Uint8Array, origin: any) => {
+      doc.on('update', (update: Uint8Array, origin: unknown) => {
         // If origin is remote or internal load, don't broadcast back
         if (origin === 'remote' || origin === 'internal') return;
 
@@ -499,13 +500,15 @@ export class SyncEngine {
     try {
       let httpBase = this.settings.serverUrl.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
       const url = `${httpBase}/api/v1/attachments/${encodeURIComponent(this.settings.vaultId)}/${encodeURIComponent(relativePath)}`;
-      const res = await fetch(url, {
+      const res = await requestUrl({
+        url,
         headers: {
           Authorization: `Bearer ${this.settings.authToken}`,
         },
+        throw: false,
       });
-      if (res.ok) {
-        const arrayBuffer = await res.arrayBuffer();
+      if (res.status === 200) {
+        const arrayBuffer = res.arrayBuffer;
         this.lockPath(relativePath, 2000);
         await this.ensureFolderExists(relativePath);
         const existing = this.app.vault.getAbstractFileByPath(relativePath);
@@ -630,7 +633,7 @@ export class SyncEngine {
         if (file) {
           this.removeDoc(path);
           this.untrackSyncedFile(path);
-          await this.app.vault.delete(file);
+          await this.app.fileManager.trashFile(file);
         }
       } else if (action === 'rename' && oldPath) {
         const oldFile = this.app.vault.getAbstractFileByPath(oldPath);
@@ -675,16 +678,18 @@ export class SyncEngine {
       let httpBase = this.settings.serverUrl.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
       const url = `${httpBase}/api/v1/attachments/${encodeURIComponent(this.settings.vaultId)}/${encodeURIComponent(file.path)}`;
 
-      const res = await fetch(url, {
+      const res = await requestUrl({
+        url,
         method: 'PUT',
         headers: {
           'Authorization': `Bearer ${this.settings.authToken}`,
           'Content-Type': 'application/octet-stream',
         },
         body: buffer,
+        throw: false,
       });
 
-      if (!res.ok) {
+      if (res.status !== 200 && res.status !== 201) {
         if (res.status === 403) {
           new Notice('🔒 Read-Only: Attachment upload blocked by server.');
         }
@@ -703,7 +708,7 @@ export class SyncEngine {
       if (!existing) {
         try {
           await this.app.vault.createFolder(current);
-        } catch (e) {
+        } catch {
           // Folder may have been created concurrently
         }
       }

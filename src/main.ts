@@ -4,13 +4,17 @@ import { AwarenessManager } from './awareness';
 import { createCollabExtension, setReadOnlyEffect } from './cm6-collab';
 import { KurotsukiSettingTab } from './settings';
 import { SyncEngine } from './sync-engine';
-import { ConnectionStatus, DEFAULT_SETTINGS, KurotsukiSettings, UserProfile, UserRole, WSMessage } from './types';
+import { DEFAULT_SETTINGS, KurotsukiSettings, UserProfile, UserRole, WSMessage } from './types';
 import { HistoryInspectorModal } from './ui/history-inspector-modal';
 import { KurotsukiPeerSidebarView, VIEW_TYPE_KUROTSUKI_PEERS } from './ui/peer-sidebar-view';
 import { ShareModal } from './ui/share-modal';
 import { StatusModal } from './ui/status-modal';
 import { VaultSwitcherModal } from './ui/vault-switcher-modal';
 import { KurotsukiWSClient } from './ws-client';
+
+interface CMEditorHost {
+  cm?: EditorView;
+}
 
 export default class KurotsukiSyncPlugin extends Plugin {
   settings: KurotsukiSettings = DEFAULT_SETTINGS;
@@ -72,22 +76,22 @@ export default class KurotsukiSyncPlugin extends Plugin {
       new StatusModal(this.app, this).open();
     });
 
-    this.addRibbonIcon('users', 'Kurotsuki Collaborators', async () => {
-      await this.activatePeerSidebar();
+    this.addRibbonIcon('users', 'Kurotsuki Collaborators', () => {
+      void this.activatePeerSidebar();
     });
 
     // 8. Register Vault Events for Local Synchronization
     this.registerEvent(
-      this.app.vault.on('modify', async (file) => {
+      this.app.vault.on('modify', (file) => {
         if (file instanceof TFile) {
-          await this.syncEngine.onLocalFileModified(file);
+          void this.syncEngine.onLocalFileModified(file);
         }
       })
     );
 
     this.registerEvent(
-      this.app.vault.on('create', async (file) => {
-        await this.syncEngine.onLocalFileCreated(file);
+      this.app.vault.on('create', (file) => {
+        void this.syncEngine.onLocalFileCreated(file);
       })
     );
 
@@ -118,23 +122,23 @@ export default class KurotsukiSyncPlugin extends Plugin {
     };
 
     this.registerEvent(
-      this.app.workspace.on('file-open', async (file) => {
-        await handleActiveFileChange(file ? file.path : null);
+      this.app.workspace.on('file-open', (file) => {
+        void handleActiveFileChange(file ? file.path : null);
       })
     );
 
     this.registerEvent(
-      this.app.workspace.on('active-leaf-change', async (leaf) => {
+      this.app.workspace.on('active-leaf-change', (leaf) => {
         if (leaf && leaf.view instanceof MarkdownView && leaf.view.file) {
-          await handleActiveFileChange(leaf.view.file.path);
+          void handleActiveFileChange(leaf.view.file.path);
         }
       })
     );
 
-    this.app.workspace.onLayoutReady(async () => {
+    this.app.workspace.onLayoutReady(() => {
       const activeFile = this.app.workspace.getActiveFile();
       if (activeFile) {
-        await handleActiveFileChange(activeFile.path);
+        void handleActiveFileChange(activeFile.path);
       }
     });
 
@@ -332,7 +336,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
       const role = this.wsClient.getCurrentRole();
       const latency = this.wsClient.getLatency();
 
-      const dot = this.statusBarEl.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+      this.statusBarEl.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
       const currentFile = this.app.workspace.getActiveFile();
       const peersInFile = currentFile ? this.awareness.getActivePeersForFile(currentFile.path).length : 0;
 
@@ -361,7 +365,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
           this.awareness.updateActiveFile(active);
         }
         this.broadcastLocalAwareness();
-        this.syncEngine.reconcileVault();
+        void this.syncEngine.reconcileVault();
       }
     });
     this.wsClient.onLatencyChange(updateBar);
@@ -376,10 +380,9 @@ export default class KurotsukiSyncPlugin extends Plugin {
   public updateEditorReadOnlyState(readOnly: boolean): void {
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (leaf.view instanceof MarkdownView && leaf.view.editor) {
-        // @ts-ignore
-        const cm = (leaf.view.editor as any).cm;
-        if (cm && typeof cm.dispatch === 'function') {
-          cm.dispatch({
+        const host = leaf.view.editor as unknown as CMEditorHost;
+        if (host.cm && typeof host.cm.dispatch === 'function') {
+          host.cm.dispatch({
             effects: [setReadOnlyEffect.of(readOnly)],
           });
         }

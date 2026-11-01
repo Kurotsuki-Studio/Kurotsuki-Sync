@@ -104,7 +104,7 @@ export class KurotsukiPeerSidebarView extends ItemView {
 
     // Role badge
     const role = this.plugin.wsClient.getCurrentRole();
-    const roleBadge = titleRow.createSpan({
+    titleRow.createSpan({
       cls: `kurotsuki-role-badge kurotsuki-role-${role}`,
       text: role.toUpperCase(),
     });
@@ -133,7 +133,7 @@ export class KurotsukiPeerSidebarView extends ItemView {
 
     // Avatar with user color
     const avatar = card.createDiv({ cls: 'kurotsuki-peer-sidebar-avatar' });
-    avatar.style.backgroundColor = state.user.color || '#3b82f6';
+    avatar.setCssStyles({ backgroundColor: state.user.color || '#3b82f6' });
     avatar.textContent = (state.user.name || '?').charAt(0).toUpperCase();
 
     // Info body
@@ -191,7 +191,8 @@ export class KurotsukiPeerSidebarView extends ItemView {
       const selLen = Math.abs(state.cursor.head - state.cursor.anchor);
 
       let lineText = '';
-      let snippetHtml = '';
+      let snippetFull = '';
+      let snippetDisplay = '';
 
       if (state.activeFile) {
         const doc = this.plugin.syncEngine.getDoc(state.activeFile);
@@ -209,8 +210,8 @@ export class KurotsukiPeerSidebarView extends ItemView {
             const to = Math.max(state.cursor.anchor, state.cursor.head);
             const rawSnippet = content.substring(Math.max(0, from), Math.min(content.length, to)).replace(/\s+/g, ' ').trim();
             if (rawSnippet) {
-              const displaySnippet = rawSnippet.length > 20 ? rawSnippet.substring(0, 20) + '…' : rawSnippet;
-              snippetHtml = `<span class="kurotsuki-cursor-snippet" title="${rawSnippet}">"${displaySnippet}"</span>`;
+              snippetFull = rawSnippet;
+              snippetDisplay = rawSnippet.length > 20 ? rawSnippet.substring(0, 20) + '…' : rawSnippet;
             }
           }
         }
@@ -218,12 +219,26 @@ export class KurotsukiPeerSidebarView extends ItemView {
 
       const posLabel = lineText ? `${lineText} (#${state.cursor.head})` : `#${state.cursor.head}`;
 
+      cursorRow.empty();
+      cursorRow.createSpan({ text: '📍 ' });
+      cursorRow.createSpan({ cls: 'kurotsuki-cursor-pos', text: posLabel });
+
       if (selLen > 0) {
         const from = Math.min(state.cursor.anchor, state.cursor.head);
         const to = Math.max(state.cursor.anchor, state.cursor.head);
-        cursorRow.innerHTML = `📍 <span class="kurotsuki-cursor-pos">${posLabel}</span> <span class="kurotsuki-selection-badge" style="background-color: ${state.user.color || '#3b82f6'};">✂️ ${selLen} car. (${from}→${to})</span> ${snippetHtml}`;
-      } else {
-        cursorRow.innerHTML = `📍 <span class="kurotsuki-cursor-pos">${posLabel}</span>`;
+        const badge = cursorRow.createSpan({
+          cls: 'kurotsuki-selection-badge',
+          text: `✂️ ${selLen} car. (${from}→${to})`,
+        });
+        badge.setCssStyles({ backgroundColor: state.user.color || '#3b82f6' });
+
+        if (snippetDisplay) {
+          cursorRow.createSpan({
+            cls: 'kurotsuki-cursor-snippet',
+            text: ` "${snippetDisplay}"`,
+            attr: { title: snippetFull },
+          });
+        }
       }
     }
   }

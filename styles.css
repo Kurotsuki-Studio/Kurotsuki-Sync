@@ -1,12 +1,13 @@
 /* Kurotsuki Sync Styling */
 
 /* Remote Cursors & Selection in CodeMirror 6 */
-.cm-kurotsuki-cursor {
+.cm-editor .cm-kurotsuki-cursor {
   position: relative;
   display: inline-block;
-  width: 0 !important;
+  width: 0;
   height: 1.2em;
   border-left: 2px solid;
+  border-left-color: var(--kurotsuki-user-color, #3b82f6);
   margin-left: -1px;
   margin-right: -1px;
   vertical-align: text-bottom;
@@ -14,7 +15,7 @@
   z-index: 100;
 }
 
-.cm-kurotsuki-cursor-label {
+.cm-editor .cm-kurotsuki-cursor-label {
   position: absolute;
   top: -1.3em;
   left: -2px;
@@ -22,6 +23,7 @@
   line-height: 1.1;
   font-weight: 600;
   color: #ffffff;
+  background-color: var(--kurotsuki-user-color, #3b82f6);
   padding: 1px 4px;
   border-radius: 3px;
   white-space: nowrap;
@@ -34,15 +36,15 @@
 }
 
 /* On mobile, hide the floating name label to prevent blocking the keyboard / text */
-.is-mobile .cm-kurotsuki-cursor-label,
+.is-mobile .cm-editor .cm-kurotsuki-cursor-label,
 @media (max-width: 768px) {
-  .cm-kurotsuki-cursor-label {
-    display: none !important;
+  .cm-editor .cm-kurotsuki-cursor-label {
+    display: none;
   }
 }
 
-.cm-kurotsuki-selection {
-  background-color: rgba(59, 130, 246, 0.25) !important;
+.cm-editor .cm-kurotsuki-selection {
+  background-color: var(--kurotsuki-sel-bg, rgba(59, 130, 246, 0.25));
   border-radius: 2px;
   pointer-events: none;
 }
@@ -560,8 +562,8 @@
   align-items: center;
 }
 
-.kurotsuki-note-same {
-  color: #22c55e !important;
+.kurotsuki-peer-sidebar-card .kurotsuki-note-link.kurotsuki-note-same {
+  color: #22c55e;
   font-weight: 600;
 }
 

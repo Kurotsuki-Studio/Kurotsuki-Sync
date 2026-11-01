@@ -1,6 +1,5 @@
 import { App, Modal, Notice } from 'obsidian';
 import type KurotsukiSyncPlugin from '../main';
-import { SyncHistoryEntry } from '../types';
 
 export class HistoryInspectorModal extends Modal {
   private plugin: KurotsukiSyncPlugin;

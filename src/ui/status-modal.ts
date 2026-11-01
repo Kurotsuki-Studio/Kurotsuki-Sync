@@ -1,8 +1,6 @@
 import { App, Modal } from 'obsidian';
-import { AwarenessManager } from '../awareness';
 import type KurotsukiSyncPlugin from '../main';
 import { HistoryInspectorModal } from './history-inspector-modal';
-import { VIEW_TYPE_KUROTSUKI_PEERS } from './peer-sidebar-view';
 import { VaultSwitcherModal } from './vault-switcher-modal';
 
 export class StatusModal extends Modal {
@@ -108,11 +106,13 @@ export class StatusModal extends Modal {
 
     if (role === 'viewer') {
       const warningBanner = contentEl.createDiv({ cls: 'kurotsuki-warning-card' });
-      warningBanner.innerHTML = '🔒 <strong>Viewer Mode:</strong> You have read-only access. Editor mutations and local saves are blocked.';
+      warningBanner.createSpan({ text: '🔒 ' });
+      warningBanner.createEl('strong', { text: 'Viewer Mode: ' });
+      warningBanner.createSpan({ text: 'You have read-only access. Editor mutations and local saves are blocked.' });
     }
 
     // Active Collaborators Section
-    contentEl.createEl('h3', { text: '👥 Online Collaborators', attr: { style: 'margin-top: 18px;' } });
+    contentEl.createEl('h3', { text: '👥 Online Collaborators', cls: 'kurotsuki-section-heading' });
 
     const local = this.plugin.awareness.getLocalState();
     const remotePeers = this.plugin.awareness.getAllRemotePeers();
@@ -123,30 +123,30 @@ export class StatusModal extends Modal {
     const localItem = peerList.createDiv({ cls: 'kurotsuki-peer-item' });
     const localInfo = localItem.createDiv({ cls: 'kurotsuki-peer-info' });
     const localAvatar = localInfo.createDiv({ cls: 'kurotsuki-peer-avatar' });
-    localAvatar.style.backgroundColor = local.user.color;
+    localAvatar.setCssStyles({ backgroundColor: local.user.color });
     localAvatar.textContent = local.user.name.charAt(0).toUpperCase();
-    localInfo.createSpan({ text: local.user.name, attr: { style: 'font-weight: 600;' } });
+    localInfo.createSpan({ text: local.user.name, cls: 'kurotsuki-user-name' });
     localItem.createSpan({ text: 'You', cls: 'kurotsuki-badge-self' });
 
     // Remote users
     if (remotePeers.length === 0) {
       peerList.createEl('p', {
         text: 'No other collaborators currently connected.',
-        attr: { style: 'color: var(--text-muted); font-size: 0.9em;' },
+        cls: 'kurotsuki-muted-text',
       });
     } else {
       for (const peer of remotePeers) {
         const item = peerList.createDiv({ cls: 'kurotsuki-peer-item' });
         const info = item.createDiv({ cls: 'kurotsuki-peer-info' });
         const avatar = info.createDiv({ cls: 'kurotsuki-peer-avatar' });
-        avatar.style.backgroundColor = peer.user.color;
+        avatar.setCssStyles({ backgroundColor: peer.user.color });
         avatar.textContent = peer.user.name.charAt(0).toUpperCase();
 
-        const nameSpan = info.createSpan({ text: peer.user.name });
+        info.createSpan({ text: peer.user.name });
         if (peer.activeFile) {
           info.createSpan({
             text: ` • ${peer.activeFile}`,
-            attr: { style: 'font-size: 0.8em; color: var(--text-muted);' },
+            cls: 'kurotsuki-muted-file',
           });
         }
       }
