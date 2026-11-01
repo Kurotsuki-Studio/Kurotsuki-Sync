@@ -15,7 +15,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName('🌙 Kurotsuki Sync Settings').setHeading();
+    new Setting(containerEl).setName('General').setHeading();
     new Setting(containerEl).setDesc(
       'Configure your self-hosted relay server, collaboration profile, and synchronization scope.'
     );

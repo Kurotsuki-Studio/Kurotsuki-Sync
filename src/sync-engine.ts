@@ -1,4 +1,4 @@
-import { App, Notice, TAbstractFile, TFile, requestUrl } from 'obsidian';
+import { App, MarkdownView, Notice, TAbstractFile, TFile, requestUrl } from 'obsidian';
 import * as Y from 'yjs';
 import { KurotsukiSettings, SyncHistoryEntry, WSMessage } from './types';
 import { base64ToUint8Array, uint8ArrayToBase64 } from './utils';
@@ -37,7 +37,7 @@ export class SyncEngine {
   public shouldSync(path: string): boolean {
     if (!path) return false;
     // Exclude hidden files / system folders
-    const configDir = (this.app.vault as any).configDir || '.obsidian';
+    const configDir = this.app.vault.configDir || '.obsidian';
     if (path.startsWith(configDir + '/') || path.startsWith('.git/') || path.startsWith('.trash/')) {
       return false;
     }
@@ -154,8 +154,7 @@ export class SyncEngine {
   public isOpenInEditor(path: string): boolean {
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      // @ts-ignore
-      if (leaf.view && leaf.view.file && leaf.view.file.path === path) {
+      if (leaf.view instanceof MarkdownView && leaf.view.file && leaf.view.file.path === path) {
         open = true;
       }
     });
@@ -386,16 +385,16 @@ export class SyncEngine {
   private handleServerMessage(msg: WSMessage): void {
     switch (msg.type) {
       case 'yjs_sync':
-        this.handleRemoteYjsSync(msg.path, msg.update);
+        void this.handleRemoteYjsSync(msg.path, msg.update);
         break;
       case 'file_event':
-        this.handleRemoteFileEvent(msg);
+        void this.handleRemoteFileEvent(msg);
         break;
       case 'file_list_response':
-        this.handleFileListResponse(msg.files);
+        void this.handleFileListResponse(msg.files);
         break;
       case 'doc_response':
-        this.handleDocResponse(msg.path, msg.update);
+        void this.handleDocResponse(msg.path, msg.update);
         break;
       case 'error':
         this.recordHistory({

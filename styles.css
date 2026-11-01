@@ -36,7 +36,10 @@
 }
 
 /* On mobile, hide the floating name label to prevent blocking the keyboard / text */
-.is-mobile .cm-editor .cm-kurotsuki-cursor-label,
+.is-mobile .cm-editor .cm-kurotsuki-cursor-label {
+  display: none;
+}
+
 @media (max-width: 768px) {
   .cm-editor .cm-kurotsuki-cursor-label {
     display: none;

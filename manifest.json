@@ -1,8 +1,8 @@
 {
   "id": "kurotsuki-sync",
   "name": "Kurotsuki Sync",
-  "version": "1.1.1",
-  "minAppVersion": "1.5.0",
+  "version": "1.1.2",
+  "minAppVersion": "1.7.2",
   "description": "Self-hosted real-time collaborative editing and local-first vault synchronization (Relay alternative).",
   "author": "Kurotsuki",
   "authorUrl": "https://github.com/Kurotsuki-Studio",

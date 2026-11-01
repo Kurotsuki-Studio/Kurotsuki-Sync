@@ -127,7 +127,7 @@ export function createCollabExtension(
       private scheduleAwarenessUpdate(): void {
         if (this.awarenessScheduled) return;
         this.awarenessScheduled = true;
-        requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
           this.awarenessScheduled = false;
           if (this.view.dom && this.view.dom.isConnected) {
             this.decorations = this.buildDecorations(this.view);

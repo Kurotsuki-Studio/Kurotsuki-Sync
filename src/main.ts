@@ -293,7 +293,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
     }
 
     if (leaf) {
-      workspace.revealLeaf(leaf);
+      await workspace.revealLeaf(leaf);
     }
   }
 
@@ -419,9 +419,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
 
     let path: string | null = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      // @ts-ignore
-      if (!path && leaf.view && leaf.view.file && leaf.view.file.path) {
-        // @ts-ignore
+      if (!path && leaf.view instanceof MarkdownView && leaf.view.file) {
         path = leaf.view.file.path;
       }
     });
@@ -429,7 +427,8 @@ export default class KurotsukiSyncPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<KurotsukiSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data || {});
   }
 
   async saveSettings() {

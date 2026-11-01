@@ -254,7 +254,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (this.awarenessScheduled)
           return;
         this.awarenessScheduled = true;
-        requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
           this.awarenessScheduled = false;
           if (this.view.dom && this.view.dom.isConnected) {
             this.decorations = this.buildDecorations(this.view);
@@ -650,7 +650,7 @@ var KurotsukiSettingTab = class extends import_obsidian2.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian2.Setting(containerEl).setName("\u{1F319} Kurotsuki Sync Settings").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("General").setHeading();
     new import_obsidian2.Setting(containerEl).setDesc(
       "Configure your self-hosted relay server, collaboration profile, and synchronization scope."
     );
@@ -9353,7 +9353,7 @@ var SyncEngine = class {
   isOpenInEditor(path) {
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view && leaf.view.file && leaf.view.file.path === path) {
+      if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file && leaf.view.file.path === path) {
         open = true;
       }
     });
@@ -9556,16 +9556,16 @@ var SyncEngine = class {
   handleServerMessage(msg) {
     switch (msg.type) {
       case "yjs_sync":
-        this.handleRemoteYjsSync(msg.path, msg.update);
+        void this.handleRemoteYjsSync(msg.path, msg.update);
         break;
       case "file_event":
-        this.handleRemoteFileEvent(msg);
+        void this.handleRemoteFileEvent(msg);
         break;
       case "file_list_response":
-        this.handleFileListResponse(msg.files);
+        void this.handleFileListResponse(msg.files);
         break;
       case "doc_response":
-        this.handleDocResponse(msg.path, msg.update);
+        void this.handleDocResponse(msg.path, msg.update);
         break;
       case "error":
         this.recordHistory({
@@ -10845,7 +10845,7 @@ ${p.split("/").pop()}`);
       }
     }
     if (leaf) {
-      workspace.revealLeaf(leaf);
+      await workspace.revealLeaf(leaf);
     }
   }
   notifyReadOnlyAttempt() {
@@ -10954,14 +10954,15 @@ ${p.split("/").pop()}`);
       return activeView.file.path;
     let path = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (!path && leaf.view && leaf.view.file && leaf.view.file.path) {
+      if (!path && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
         path = leaf.view.file.path;
       }
     });
     return path;
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data || {});
   }
   async saveSettings() {
     await this.saveData(this.settings);
