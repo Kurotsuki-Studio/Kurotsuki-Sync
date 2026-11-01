@@ -1,6 +1,6 @@
 {
   "name": "obsidian-kurotsuki-sync",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Self-hosted real-time collaborative editing and local-first vault synchronization for Obsidian",
   "main": "main.js",
   "scripts": {
