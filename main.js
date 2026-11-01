@@ -650,10 +650,10 @@ var KurotsukiSettingTab = class extends import_obsidian2.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian2.Setting(containerEl).setName("General").setHeading();
-    new import_obsidian2.Setting(containerEl).setDesc(
-      "Configure your self-hosted relay server, collaboration profile, and synchronization scope."
-    );
+    containerEl.createEl("p", {
+      text: "Configure your self-hosted relay server, collaboration profile, and synchronization scope.",
+      cls: "kurotsuki-settings-desc"
+    });
     const role = this.plugin.wsClient.getCurrentRole();
     const status = this.plugin.wsClient.getStatus();
     const latency = this.plugin.wsClient.getLatency();
@@ -9255,8 +9255,8 @@ var SyncEngine = class {
   shouldSync(path) {
     if (!path)
       return false;
-    const configDir = this.app.vault.configDir || ".obsidian";
-    if (path.startsWith(configDir + "/") || path.startsWith(".git/") || path.startsWith(".trash/")) {
+    const configDir = this.app.vault.configDir;
+    if (configDir && path.startsWith(configDir + "/") || path.startsWith(".git/") || path.startsWith(".trash/")) {
       return false;
     }
     if (this.settings.syncMode === "entire_vault") {

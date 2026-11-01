@@ -37,8 +37,8 @@ export class SyncEngine {
   public shouldSync(path: string): boolean {
     if (!path) return false;
     // Exclude hidden files / system folders
-    const configDir = this.app.vault.configDir || '.obsidian';
-    if (path.startsWith(configDir + '/') || path.startsWith('.git/') || path.startsWith('.trash/')) {
+    const configDir = this.app.vault.configDir;
+    if ((configDir && path.startsWith(configDir + '/')) || path.startsWith('.git/') || path.startsWith('.trash/')) {
       return false;
     }
 

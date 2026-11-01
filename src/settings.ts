@@ -15,10 +15,10 @@ export class KurotsukiSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName('General').setHeading();
-    new Setting(containerEl).setDesc(
-      'Configure your self-hosted relay server, collaboration profile, and synchronization scope.'
-    );
+    containerEl.createEl('p', {
+      text: 'Configure your self-hosted relay server, collaboration profile, and synchronization scope.',
+      cls: 'kurotsuki-settings-desc',
+    });
 
     // Role & Connection State Banner
     const role = this.plugin.wsClient.getCurrentRole();
