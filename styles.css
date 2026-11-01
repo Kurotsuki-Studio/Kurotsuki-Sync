@@ -29,13 +29,26 @@
   white-space: nowrap;
   pointer-events: none;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-  opacity: 0.85;
-  transition: opacity 0.2s ease-in-out;
+  opacity: 0.9;
+  transition: opacity 0.3s ease-in-out;
   user-select: none;
   z-index: 101;
 }
 
-/* On mobile, hide the floating name label to prevent blocking the keyboard / text */
+.cm-editor .cm-kurotsuki-cursor-label.kurotsuki-cursor-recent {
+  opacity: 0.9;
+}
+
+.cm-editor .cm-kurotsuki-cursor-label.kurotsuki-cursor-idle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cm-editor .cm-kurotsuki-cursor:hover .cm-kurotsuki-cursor-label.kurotsuki-cursor-idle {
+  opacity: 0.95;
+}
+
+/* On mobile devices, hide floating name badge to avoid disrupting virtual keyboards and typing */
 .is-mobile .cm-editor .cm-kurotsuki-cursor-label {
   display: none;
 }

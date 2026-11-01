@@ -62,10 +62,12 @@ function computeTextChanges(oldText: string, newText: string): Array<{ from: num
 
 class RemoteCursorWidget extends WidgetType {
   private user: PeerAwarenessState['user'];
+  private isRecent: boolean;
 
-  constructor(user: PeerAwarenessState['user']) {
+  constructor(user: PeerAwarenessState['user'], isRecent = true) {
     super();
     this.user = user;
+    this.isRecent = isRecent;
   }
 
   toDOM(): HTMLElement {
@@ -74,7 +76,7 @@ class RemoteCursorWidget extends WidgetType {
     cursor.setCssProps({ '--kurotsuki-user-color': color });
 
     const label = cursor.createSpan({
-      cls: 'cm-kurotsuki-cursor-label',
+      cls: `cm-kurotsuki-cursor-label ${this.isRecent ? 'kurotsuki-cursor-recent' : 'kurotsuki-cursor-idle'}`,
       text: this.user.name || 'Collaborator',
     });
     label.setCssProps({ '--kurotsuki-user-color': color });
@@ -82,8 +84,25 @@ class RemoteCursorWidget extends WidgetType {
     return cursor;
   }
 
+  updateDOM(dom: HTMLElement): boolean {
+    const color = this.user.color || '#3b82f6';
+    dom.setCssProps({ '--kurotsuki-user-color': color });
+    const label = dom.querySelector('.cm-kurotsuki-cursor-label') as HTMLElement | null;
+    if (label) {
+      label.textContent = this.user.name || 'Collaborator';
+      label.setCssProps({ '--kurotsuki-user-color': color });
+      label.className = `cm-kurotsuki-cursor-label ${this.isRecent ? 'kurotsuki-cursor-recent' : 'kurotsuki-cursor-idle'}`;
+    }
+    return true;
+  }
+
   eq(other: RemoteCursorWidget): boolean {
-    return this.user.id === other.user.id && this.user.color === other.user.color && this.user.name === other.user.name;
+    return (
+      this.user.id === other.user.id &&
+      this.user.color === other.user.color &&
+      this.user.name === other.user.name &&
+      this.isRecent === other.isRecent
+    );
   }
 
   ignoreEvent(): boolean {
@@ -157,8 +176,11 @@ export function createCollabExtension(
           return;
         }
 
-        if (this.view.hasFocus && awareness.getLocalState().activeFile !== path) {
-          awareness.updateActiveFile(path);
+        // If active file is detected, update awareness if this leaf is focused or if awareness is empty
+        if (this.view.hasFocus || !awareness.getLocalState().activeFile) {
+          if (awareness.getLocalState().activeFile !== path) {
+            awareness.updateActiveFile(path);
+          }
         }
 
         if (path === this.boundPath && this.currentYText) return;
@@ -240,8 +262,10 @@ export function createCollabExtension(
       }
 
       update(update: ViewUpdate) {
-        // Check if active note changed
-        this.bindActiveYDoc();
+        // Re-bind only if path changed or not yet bound, or on focus / viewport changes
+        if (!this.boundPath || update.viewportChanged || update.view.hasFocus) {
+          this.bindActiveYDoc();
+        }
         this.syncReadOnlyState(update.view);
 
         const hasAwarenessEffect = update.transactions.some((tr) =>
@@ -278,8 +302,8 @@ export function createCollabExtension(
           }
         }
 
-        // Send local cursor to awareness when focused
-        if (update.selectionSet && update.view.hasFocus) {
+        // Send local cursor to awareness when focused or editing (handles mobile virtual keyboard)
+        if (update.selectionSet && (update.view.hasFocus || update.docChanged)) {
           const main = update.state.selection.main;
           if (
             typeof main.anchor === 'number' &&
@@ -375,8 +399,9 @@ export function createCollabExtension(
           }
 
           // 2. Remote Cursor Caret & Name Tag
+          const isRecent = Date.now() - peer.lastActive < 4000;
           const widgetDeco = Decoration.widget({
-            widget: new RemoteCursorWidget(peer.user),
+            widget: new RemoteCursorWidget(peer.user, isRecent),
             side: 1,
           });
           ranges.push(widgetDeco.range(safeHead));

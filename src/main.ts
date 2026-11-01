@@ -395,7 +395,10 @@ export default class KurotsukiSyncPlugin extends Plugin {
       let foundPath: string | null = null;
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (!foundPath && leaf.view instanceof MarkdownView && leaf.view.file) {
-          if (
+          const host = leaf.view.editor as unknown as CMEditorHost;
+          if (host?.cm === view || host?.cm?.dom === view.dom) {
+            foundPath = leaf.view.file.path;
+          } else if (
             (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) ||
             (leaf.view.containerEl && leaf.view.containerEl.contains(view.dom))
           ) {
@@ -404,8 +407,12 @@ export default class KurotsukiSyncPlugin extends Plugin {
         }
       });
       if (foundPath) return foundPath;
-      // If a specific view was given but doesn't belong to any open markdown leaf, do not bind to active file
-      return null;
+
+      // On mobile or before view.dom is connected into leaf container, fallback to active markdown view
+      const activeMarkdown = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (activeMarkdown?.file) {
+        return activeMarkdown.file.path;
+      }
     }
     return this.getRobustActiveFilePath();
   }

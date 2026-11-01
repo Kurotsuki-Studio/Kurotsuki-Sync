@@ -206,23 +206,35 @@ function computeTextChanges(oldText, newText) {
   }];
 }
 var RemoteCursorWidget = class extends import_view.WidgetType {
-  constructor(user) {
+  constructor(user, isRecent = true) {
     super();
     this.user = user;
+    this.isRecent = isRecent;
   }
   toDOM() {
     const cursor = createSpan({ cls: "cm-kurotsuki-cursor" });
     const color = this.user.color || "#3b82f6";
     cursor.setCssProps({ "--kurotsuki-user-color": color });
     const label = cursor.createSpan({
-      cls: "cm-kurotsuki-cursor-label",
+      cls: `cm-kurotsuki-cursor-label ${this.isRecent ? "kurotsuki-cursor-recent" : "kurotsuki-cursor-idle"}`,
       text: this.user.name || "Collaborator"
     });
     label.setCssProps({ "--kurotsuki-user-color": color });
     return cursor;
   }
+  updateDOM(dom) {
+    const color = this.user.color || "#3b82f6";
+    dom.setCssProps({ "--kurotsuki-user-color": color });
+    const label = dom.querySelector(".cm-kurotsuki-cursor-label");
+    if (label) {
+      label.textContent = this.user.name || "Collaborator";
+      label.setCssProps({ "--kurotsuki-user-color": color });
+      label.className = `cm-kurotsuki-cursor-label ${this.isRecent ? "kurotsuki-cursor-recent" : "kurotsuki-cursor-idle"}`;
+    }
+    return true;
+  }
   eq(other) {
-    return this.user.id === other.user.id && this.user.color === other.user.color && this.user.name === other.user.name;
+    return this.user.id === other.user.id && this.user.color === other.user.color && this.user.name === other.user.name && this.isRecent === other.isRecent;
   }
   ignoreEvent() {
     return true;
@@ -281,8 +293,10 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (!path) {
           return;
         }
-        if (this.view.hasFocus && awareness.getLocalState().activeFile !== path) {
-          awareness.updateActiveFile(path);
+        if (this.view.hasFocus || !awareness.getLocalState().activeFile) {
+          if (awareness.getLocalState().activeFile !== path) {
+            awareness.updateActiveFile(path);
+          }
         }
         if (path === this.boundPath && this.currentYText)
           return;
@@ -350,7 +364,9 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         yText.observe(this.yTextObserver);
       }
       update(update) {
-        this.bindActiveYDoc();
+        if (!this.boundPath || update.viewportChanged || update.view.hasFocus) {
+          this.bindActiveYDoc();
+        }
         this.syncReadOnlyState(update.view);
         const hasAwarenessEffect = update.transactions.some(
           (tr) => tr.effects.some((e) => e.is(awarenessEffect))
@@ -382,7 +398,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             }
           }
         }
-        if (update.selectionSet && update.view.hasFocus) {
+        if (update.selectionSet && (update.view.hasFocus || update.docChanged)) {
           const main = update.state.selection.main;
           if (typeof main.anchor === "number" && typeof main.head === "number" && !isNaN(main.anchor) && !isNaN(main.head)) {
             const path = getActiveFilePath(update.view);
@@ -458,8 +474,9 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             });
             ranges.push(markDeco.range(safeFrom, safeTo));
           }
+          const isRecent = Date.now() - peer.lastActive < 4e3;
           const widgetDeco = import_view.Decoration.widget({
-            widget: new RemoteCursorWidget(peer.user),
+            widget: new RemoteCursorWidget(peer.user, isRecent),
             side: 1
           });
           ranges.push(widgetDeco.range(safeHead));
@@ -10934,14 +10951,20 @@ ${p.split("/").pop()}`);
       let foundPath = null;
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
-          if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom) || leaf.view.containerEl && leaf.view.containerEl.contains(view.dom)) {
+          const host = leaf.view.editor;
+          if (host?.cm === view || host?.cm?.dom === view.dom) {
+            foundPath = leaf.view.file.path;
+          } else if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom) || leaf.view.containerEl && leaf.view.containerEl.contains(view.dom)) {
             foundPath = leaf.view.file.path;
           }
         }
       });
       if (foundPath)
         return foundPath;
-      return null;
+      const activeMarkdown = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+      if (activeMarkdown?.file) {
+        return activeMarkdown.file.path;
+      }
     }
     return this.getRobustActiveFilePath();
   }
