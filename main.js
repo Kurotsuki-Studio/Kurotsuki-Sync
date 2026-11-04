@@ -403,9 +403,6 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             return;
           const currentCmText = this.view.state.doc.toString();
           const targetYText = yText.toString();
-          if (targetYText.length === 0 && currentCmText.length > 0) {
-            return;
-          }
           if (currentCmText === targetYText) {
             return;
           }
@@ -465,25 +462,23 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             const doc2 = yText.doc;
             if (doc2) {
               const currentCmText = update.state.doc.toString();
-              if (yText.length === 0 && currentCmText.length > 0) {
+              const oldYText = yText.toString();
+              if (oldYText.length === 0 && currentCmText.length > 0) {
                 doc2.transact(() => {
                   yText.insert(0, currentCmText);
                 }, "cm6");
-              } else {
+              } else if (oldYText !== currentCmText) {
+                const changes = computeTextChanges(oldYText, currentCmText);
                 doc2.transact(() => {
-                  let adj = 0;
-                  update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                    const insertStr = inserted.toString();
-                    const deleteLen = toA - fromA;
-                    const pos = fromA + adj;
-                    if (deleteLen > 0) {
-                      yText.delete(pos, deleteLen);
+                  for (const c of changes) {
+                    const delLen = c.to - c.from;
+                    if (delLen > 0) {
+                      yText.delete(c.from, delLen);
                     }
-                    if (insertStr.length > 0) {
-                      yText.insert(pos, insertStr);
+                    if (c.insert.length > 0) {
+                      yText.insert(c.from, c.insert);
                     }
-                    adj += insertStr.length - deleteLen;
-                  });
+                  }
                 }, "cm6");
               }
             }
@@ -9457,28 +9452,43 @@ var SyncEngine = class {
   }
   isOpenInEditor(rawPath) {
     const path = normalizePath(rawPath);
+    if (!path)
+      return false;
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile && normalizePath(activeFile.path) === path) {
+      return true;
+    }
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+    if (activeView?.file && normalizePath(activeView.file.path) === path) {
+      return true;
+    }
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file && normalizePath(leaf.view.file.path) === path) {
-        open = true;
+      const view = leaf.view;
+      if (view) {
+        const viewFile = view.file;
+        if (viewFile && normalizePath(viewFile.path) === path) {
+          open = true;
+        }
       }
     });
     return open;
   }
   async onLocalFileModified(file) {
-    if (!this.shouldSync(file.path))
+    const cleanPath = normalizePath(file.path);
+    if (!this.shouldSync(cleanPath))
       return;
-    if (this.isLocked(file.path))
+    if (this.isLocked(cleanPath))
       return;
     if (this.isReadOnly()) {
       return;
     }
-    if (this.isOpenInEditor(file.path)) {
+    if (this.isOpenInEditor(cleanPath)) {
       return;
     }
     if (file.extension === "md" || file.extension === "txt" || file.extension === "canvas") {
       const content = await this.app.vault.read(file);
-      const doc2 = this.getOrCreateDoc(file.path);
+      const doc2 = this.getOrCreateDoc(cleanPath);
       const yText = doc2.getText("content");
       this.applyTextDiff(yText, content);
     } else if (this.settings.syncAttachments) {

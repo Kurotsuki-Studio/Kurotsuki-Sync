@@ -231,11 +231,6 @@ export function createCollabExtension(
           const currentCmText = this.view.state.doc.toString();
           const targetYText = yText.toString();
 
-          // If Yjs is completely empty and CM has text, wait for server sync or first keystroke
-          if (targetYText.length === 0 && currentCmText.length > 0) {
-            return;
-          }
-
           if (currentCmText === targetYText) {
             return; // In exact sync, do not dispatch or duplicate
           }
@@ -310,26 +305,24 @@ export function createCollabExtension(
             const doc = yText.doc;
             if (doc) {
               const currentCmText = update.state.doc.toString();
-              if (yText.length === 0 && currentCmText.length > 0) {
+              const oldYText = yText.toString();
+              if (oldYText.length === 0 && currentCmText.length > 0) {
                 // Initial seed from first typing client
                 doc.transact(() => {
                   yText.insert(0, currentCmText);
                 }, 'cm6');
-              } else {
+              } else if (oldYText !== currentCmText) {
+                const changes = computeTextChanges(oldYText, currentCmText);
                 doc.transact(() => {
-                  let adj = 0;
-                  update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                    const insertStr = inserted.toString();
-                    const deleteLen = toA - fromA;
-                    const pos = fromA + adj;
-                    if (deleteLen > 0) {
-                      yText.delete(pos, deleteLen);
+                  for (const c of changes) {
+                    const delLen = c.to - c.from;
+                    if (delLen > 0) {
+                      yText.delete(c.from, delLen);
                     }
-                    if (insertStr.length > 0) {
-                      yText.insert(pos, insertStr);
+                    if (c.insert.length > 0) {
+                      yText.insert(c.from, c.insert);
                     }
-                    adj += insertStr.length - deleteLen;
-                  });
+                  }
                 }, 'cm6');
               }
             }

@@ -173,18 +173,38 @@ export class SyncEngine {
 
   public isOpenInEditor(rawPath: string): boolean {
     const path = normalizePath(rawPath);
+    if (!path) return false;
+
+    // Fast check: active file in workspace
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile && normalizePath(activeFile.path) === path) {
+      return true;
+    }
+
+    // Check active view of type MarkdownView
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView?.file && normalizePath(activeView.file.path) === path) {
+      return true;
+    }
+
+    // Check all open leaves across mobile and desktop without fragile instanceof
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view instanceof MarkdownView && leaf.view.file && normalizePath(leaf.view.file.path) === path) {
-        open = true;
+      const view = leaf.view;
+      if (view) {
+        const viewFile = (view as any).file;
+        if (viewFile && normalizePath(viewFile.path) === path) {
+          open = true;
+        }
       }
     });
     return open;
   }
 
   public async onLocalFileModified(file: TFile): Promise<void> {
-    if (!this.shouldSync(file.path)) return;
-    if (this.isLocked(file.path)) return;
+    const cleanPath = normalizePath(file.path);
+    if (!this.shouldSync(cleanPath)) return;
+    if (this.isLocked(cleanPath)) return;
 
     // Block local modifications from affecting CRDT or syncing if user is viewer
     if (this.isReadOnly()) {
@@ -194,14 +214,14 @@ export class SyncEngine {
     // IMPORTANT: If this file is currently open in ANY editor in Obsidian,
     // the CM6 extension is ALREADY tracking every keystroke directly into Yjs!
     // Do NOT read stale disk cache and do NOT overwrite Yjs while user is typing!
-    if (this.isOpenInEditor(file.path)) {
+    if (this.isOpenInEditor(cleanPath)) {
       return;
     }
 
     // For markdown files: sync text via Yjs with surgical diff
     if (file.extension === 'md' || file.extension === 'txt' || file.extension === 'canvas') {
       const content = await this.app.vault.read(file);
-      const doc = this.getOrCreateDoc(file.path);
+      const doc = this.getOrCreateDoc(cleanPath);
       const yText = doc.getText('content');
       this.applyTextDiff(yText, content);
     } else if (this.settings.syncAttachments) {
