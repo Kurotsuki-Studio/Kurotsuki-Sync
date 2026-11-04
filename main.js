@@ -9341,14 +9341,17 @@ var SyncEngine = class {
   shouldSync(path) {
     if (!path)
       return false;
+    const normalized = path.replace(/\\/g, "/");
+    if (normalized.startsWith(".") || normalized.includes("/.") || normalized.includes(".obsidian")) {
+      return false;
+    }
     const configDir = this.app.vault.configDir;
-    if (configDir && path.startsWith(configDir + "/") || path.startsWith(".git/") || path.startsWith(".trash/")) {
+    if (configDir && (normalized === configDir || normalized.startsWith(configDir + "/"))) {
       return false;
     }
     if (this.settings.syncMode === "entire_vault") {
       return true;
     }
-    const normalized = path.replace(/\\/g, "/");
     return this.settings.sharedFolders.some((folder) => {
       const cleanFolder = folder.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
       if (!cleanFolder)
@@ -9693,12 +9696,6 @@ var SyncEngine = class {
         }
       } else {
         this.trackSyncedFile(rf.path);
-        if (!this.isOpenInEditor(rf.path) && !rf.isAttachment && !this.isAttachmentPath(rf.path)) {
-          this.wsClient.send({
-            type: "doc_request",
-            path: rf.path
-          });
-        }
       }
     }
     const localFiles = this.app.vault.getFiles();
@@ -9727,6 +9724,7 @@ var SyncEngine = class {
               path: file.path,
               update: uint8ArrayToBase64(state)
             });
+            await new Promise((resolve) => setTimeout(resolve, 15));
           }
         }
       }
@@ -9741,6 +9739,13 @@ var SyncEngine = class {
     this.trackSyncedFile(path);
     if (!this.isOpenInEditor(path)) {
       const content = doc2.getText("content").toString();
+      const abstractFile = this.app.vault.getAbstractFileByPath(path);
+      if (abstractFile instanceof import_obsidian3.TFile) {
+        const diskContent = await this.app.vault.read(abstractFile);
+        if (diskContent === content) {
+          return;
+        }
+      }
       await this.writeToVaultSafely(path, content);
     }
   }

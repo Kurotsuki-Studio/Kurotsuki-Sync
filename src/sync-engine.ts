@@ -36,9 +36,15 @@ export class SyncEngine {
 
   public shouldSync(path: string): boolean {
     if (!path) return false;
-    // Exclude hidden files / system folders
+    const normalized = path.replace(/\\/g, '/');
+
+    // Strict check: NEVER sync any hidden file or folder (e.g. .obsidian, .git, .trash, .smart-env)
+    if (normalized.startsWith('.') || normalized.includes('/.') || normalized.includes('.obsidian')) {
+      return false;
+    }
+
     const configDir = this.app.vault.configDir;
-    if ((configDir && path.startsWith(configDir + '/')) || path.startsWith('.git/') || path.startsWith('.trash/')) {
+    if (configDir && (normalized === configDir || normalized.startsWith(configDir + '/'))) {
       return false;
     }
 
@@ -47,7 +53,6 @@ export class SyncEngine {
     }
 
     // Selective mode: check if path begins with any shared folder
-    const normalized = path.replace(/\\/g, '/');
     return this.settings.sharedFolders.some((folder) => {
       const cleanFolder = folder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       if (!cleanFolder) return false;
@@ -423,7 +428,7 @@ export class SyncEngine {
   public async handleFileListResponse(remoteFiles: Array<{ path: string; mtime: number; isAttachment?: boolean }>): Promise<void> {
     const remotePaths = new Set(remoteFiles.map((f) => f.path));
 
-    // 1. Process all remote files from server: download anything we don't have
+    // 1. Process all remote files from server: only download files missing on local disk
     for (const rf of remoteFiles) {
       if (!this.shouldSync(rf.path)) continue;
       const localFile = this.app.vault.getAbstractFileByPath(rf.path);
@@ -440,15 +445,8 @@ export class SyncEngine {
           });
         }
       } else {
-        // Exists locally -> ensure tracked
+        // Already exists on local disk -> keep tracked without flooding disk writes
         this.trackSyncedFile(rf.path);
-        // Do NOT request doc_request if file is actively open in editor
-        if (!this.isOpenInEditor(rf.path) && !rf.isAttachment && !this.isAttachmentPath(rf.path)) {
-          this.wsClient.send({
-            type: 'doc_request',
-            path: rf.path,
-          });
-        }
       }
     }
 
@@ -478,6 +476,8 @@ export class SyncEngine {
               path: file.path,
               update: uint8ArrayToBase64(state),
             });
+            // Small pause between file seeding to prevent starving the event loop
+            await new Promise((resolve) => setTimeout(resolve, 15));
           }
         }
       }
@@ -492,6 +492,14 @@ export class SyncEngine {
     this.trackSyncedFile(path);
     if (!this.isOpenInEditor(path)) {
       const content = doc.getText('content').toString();
+      // Only write to vault if content on disk is actually different
+      const abstractFile = this.app.vault.getAbstractFileByPath(path);
+      if (abstractFile instanceof TFile) {
+        const diskContent = await this.app.vault.read(abstractFile);
+        if (diskContent === content) {
+          return; // Skip identical write, prevent triggering Obsidian re-indexing
+        }
+      }
       await this.writeToVaultSafely(path, content);
     }
   }
