@@ -15,6 +15,7 @@ import { PeerAwarenessState } from './types';
 export const remoteSyncAnnotation = Annotation.define<boolean>();
 export const setReadOnlyEffect = StateEffect.define<boolean>();
 export const awarenessEffect = StateEffect.define<void>();
+export const rebindEffect = StateEffect.define<void>();
 
 export const readOnlyField = StateField.define<boolean>({
   create: () => false,
@@ -128,8 +129,10 @@ export function createCollabExtension(
       private yTextObserver: ((event: Y.YTextEvent) => void) | null = null;
       private isDispatchingRemote = false;
       private awarenessScheduled = false;
+      private lastPeerFingerprint = '';
 
       constructor(private view: EditorView) {
+        this.bindActiveYDoc();
         this.decorations = this.buildDecorations(view);
 
         this.unsubscribeAwareness = awareness.subscribe(() => {
@@ -140,16 +143,39 @@ export function createCollabExtension(
 
         this.updateBanner(view);
         this.syncReadOnlyState(view);
-        this.bindActiveYDoc();
+      }
+
+      private getPeersFingerprint(currentPath: string): string {
+        const peers = awareness.getActivePeersForFile(currentPath);
+        if (peers.length === 0) return '';
+        let fp = '';
+        for (const p of peers) {
+          fp += `${p.clientId}:${p.cursor?.anchor},${p.cursor?.head}:${p.user.color}:${p.user.name};`;
+        }
+        return fp;
       }
 
       private scheduleAwarenessUpdate(): void {
+        if (!this.view.dom || !this.view.dom.isConnected) return;
+        const currentPath = this.boundPath || getActiveFilePath(this.view);
+        if (!currentPath) return;
+
+        const newFp = this.getPeersFingerprint(currentPath);
+        if (newFp === this.lastPeerFingerprint) {
+          // No peers in this file, or identical cursor/user positions
+          return;
+        }
+
         if (this.awarenessScheduled) return;
         this.awarenessScheduled = true;
         window.requestAnimationFrame(() => {
           this.awarenessScheduled = false;
           if (this.view.dom && this.view.dom.isConnected) {
-            this.decorations = this.buildDecorations(this.view);
+            const path = this.boundPath || getActiveFilePath(this.view);
+            if (!path) return;
+            const currentFp = this.getPeersFingerprint(path);
+            if (currentFp === this.lastPeerFingerprint) return;
+            this.lastPeerFingerprint = currentFp;
             this.view.dispatch({
               effects: [awarenessEffect.of()],
             });
@@ -262,18 +288,33 @@ export function createCollabExtension(
       }
 
       update(update: ViewUpdate) {
-        // Re-bind only if path changed or not yet bound, or on focus / viewport changes
-        if (!this.boundPath || update.viewportChanged || update.view.hasFocus) {
+        const hasRebindEffect = update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(rebindEffect))
+        );
+
+        // Re-bind only if not yet bound, explicitly notified of file switch, or focus changed into this view
+        if (!this.boundPath || hasRebindEffect || (update.focusChanged && update.view.hasFocus)) {
           this.bindActiveYDoc();
         }
-        this.syncReadOnlyState(update.view);
+
+        // Update read-only banner only on role/read-only effect or focus change
+        const hasReadOnlyEffect = update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(setReadOnlyEffect))
+        );
+        if (hasReadOnlyEffect || update.focusChanged) {
+          this.syncReadOnlyState(update.view);
+          this.updateBanner(update.view);
+        }
 
         const hasAwarenessEffect = update.transactions.some((tr) =>
           tr.effects.some((e) => e.is(awarenessEffect))
         );
 
-        if (update.docChanged || update.viewportChanged || update.selectionSet || hasAwarenessEffect) {
+        if (hasAwarenessEffect) {
           this.decorations = this.buildDecorations(update.view);
+        } else if (update.docChanged && this.decorations !== Decoration.none) {
+          // Efficient O(log N) decoration mapping on typing, preserving remote widgets
+          this.decorations = this.decorations.map(update.changes);
         }
 
         // Propagate local keystrokes / edits into Yjs text immediately
@@ -311,9 +352,8 @@ export function createCollabExtension(
             !isNaN(main.anchor) &&
             !isNaN(main.head)
           ) {
-            const path = getActiveFilePath(update.view);
-            if (path && awareness.getLocalState().activeFile !== path) {
-              awareness.updateActiveFile(path);
+            if (this.boundPath && awareness.getLocalState().activeFile !== this.boundPath) {
+              awareness.updateActiveFile(this.boundPath);
             }
             awareness.updateCursor({
               anchor: main.anchor,
@@ -321,8 +361,6 @@ export function createCollabExtension(
             });
           }
         }
-
-        this.updateBanner(update.view);
       }
 
       private updateBanner(view: EditorView): void {
@@ -361,7 +399,7 @@ export function createCollabExtension(
       }
 
       private buildDecorations(view: EditorView): DecorationSet {
-        const currentPath = getActiveFilePath(view);
+        const currentPath = this.boundPath || getActiveFilePath(view);
         if (!currentPath) return Decoration.none;
 
         const peers = awareness.getActivePeersForFile(currentPath);

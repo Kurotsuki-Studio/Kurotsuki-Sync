@@ -1,12 +1,14 @@
 {
   "name": "obsidian-kurotsuki-sync",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Self-hosted real-time collaborative editing and local-first vault synchronization for Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
-    "test": "node --test dist-test/**/*.test.js || echo 'Run compiled tests'"
+    "test:bundle": "esbuild tests/sync-engine.test.ts --bundle --platform=node --format=esm --outfile=dist-test/sync-engine.test.js --external:obsidian --external:electron",
+    "pretest": "npm run test:bundle",
+    "test": "node --test dist-test/**/*.test.js"
   },
   "keywords": [
     "obsidian",

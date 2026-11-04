@@ -68,17 +68,23 @@ export class SyncEngine {
     list.push(update);
 
     if (!this.pendingOutgoingTimers.has(path)) {
-      const timer = window.setTimeout(() => {
+      const timer = window.setTimeout ? window.setTimeout(() => {
         this.flushOutgoingYjsUpdate(path);
-      }, 25);
+      }, 30) : (setTimeout(() => {
+        this.flushOutgoingYjsUpdate(path);
+      }, 30) as unknown as number);
       this.pendingOutgoingTimers.set(path, timer);
     }
   }
 
-  private flushOutgoingYjsUpdate(path: string): void {
+  public flushOutgoingYjsUpdate(path: string): void {
     const timer = this.pendingOutgoingTimers.get(path);
-    if (timer) {
-      window.clearTimeout(timer);
+    if (timer !== undefined) {
+      if (typeof window !== 'undefined' && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
       this.pendingOutgoingTimers.delete(path);
     }
 
@@ -93,7 +99,7 @@ export class SyncEngine {
       type: 'local_update',
       path,
       sizeBytes: merged.length,
-      summary: `Sent local CRDT update (${merged.length} bytes)`,
+      summary: `Sent local CRDT update (${merged.length} bytes${updates.length > 1 ? `, ${updates.length} batched` : ''})`,
     });
 
     this.wsClient.send({
@@ -101,6 +107,13 @@ export class SyncEngine {
       path,
       update: b64,
     });
+  }
+
+  public flushAllOutgoingUpdates(): void {
+    const paths = Array.from(this.pendingOutgoingUpdates.keys());
+    for (const p of paths) {
+      this.flushOutgoingYjsUpdate(p);
+    }
   }
 
   public getOrCreateDoc(path: string, initialContent?: string): Y.Doc {
@@ -123,19 +136,7 @@ export class SyncEngine {
           return;
         }
 
-        const b64 = uint8ArrayToBase64(update);
-        this.recordHistory({
-          type: 'local_update',
-          path,
-          sizeBytes: update.length,
-          summary: `Sent local CRDT update (${update.length} bytes)`,
-        });
-
-        this.wsClient.send({
-          type: 'yjs_sync',
-          path,
-          update: b64,
-        });
+        this.queueOutgoingYjsUpdate(path, update);
       });
 
       this.docs.set(path, doc);
@@ -557,10 +558,14 @@ export class SyncEngine {
   private debounceDiskWrite(path: string, doc: Y.Doc): void {
     const existing = this.pendingLocalDebounce.get(path);
     if (existing) {
-      window.clearTimeout(existing);
+      if (typeof window !== 'undefined' && window.clearTimeout) {
+        window.clearTimeout(existing);
+      } else {
+        clearTimeout(existing);
+      }
     }
 
-    const timer = window.setTimeout(async () => {
+    const timer = window.setTimeout ? window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
 
       // Protect active editor: do NOT overwrite the file on disk while open in editor
@@ -570,15 +575,29 @@ export class SyncEngine {
 
       const text = doc.getText('content').toString();
       await this.writeToVaultSafely(path, text);
-    }, 1500);
+    }, 1500) : (setTimeout(async () => {
+      this.pendingLocalDebounce.delete(path);
+
+      if (this.isOpenInEditor(path)) {
+        return;
+      }
+
+      const text = doc.getText('content').toString();
+      await this.writeToVaultSafely(path, text);
+    }, 1500) as unknown as number);
 
     this.pendingLocalDebounce.set(path, timer);
   }
 
   public async flushDocToDisk(path: string): Promise<void> {
+    this.flushOutgoingYjsUpdate(path);
     const timer = this.pendingLocalDebounce.get(path);
     if (timer) {
-      window.clearTimeout(timer);
+      if (typeof window !== 'undefined' && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
       this.pendingLocalDebounce.delete(path);
     }
     const doc = this.docs.get(path);
@@ -736,7 +755,7 @@ export class SyncEngine {
     };
     this.historyLogs.unshift(item);
     if (this.historyLogs.length > 200) {
-      this.historyLogs = this.historyLogs.slice(0, 200);
+      this.historyLogs.pop();
     }
   }
 
@@ -749,12 +768,21 @@ export class SyncEngine {
   }
 
   public resetDocs(): void {
+    this.flushAllOutgoingUpdates();
     for (const timer of this.pendingLocalDebounce.values()) {
-      window.clearTimeout(timer);
+      if (typeof window !== 'undefined' && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
     }
     this.pendingLocalDebounce.clear();
     for (const timer of this.pendingOutgoingTimers.values()) {
-      window.clearTimeout(timer);
+      if (typeof window !== 'undefined' && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
     }
     this.pendingOutgoingTimers.clear();
     this.pendingOutgoingUpdates.clear();

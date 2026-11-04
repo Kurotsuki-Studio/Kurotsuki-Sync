@@ -75,21 +75,45 @@ var AwarenessManager = class {
     }
   }
   updateCursor(cursor) {
+    const prev = this.localState.cursor;
+    if (prev === null && cursor === null || prev !== null && cursor !== null && prev.anchor === cursor.anchor && prev.head === cursor.head) {
+      return;
+    }
     this.localState.cursor = cursor;
     this.localState.lastActive = Date.now();
     this.notifyLocal();
   }
   handleRemoteAwareness(states) {
     const now = Date.now();
+    let hasChanged = false;
     for (const state of states) {
       if (state.clientId === this.localState.clientId)
         continue;
-      this.remotePeers.set(state.clientId, {
-        ...state,
-        lastActive: now
-      });
+      const existing = this.remotePeers.get(state.clientId);
+      if (!existing) {
+        this.remotePeers.set(state.clientId, {
+          ...state,
+          lastActive: now
+        });
+        hasChanged = true;
+      } else {
+        const cursorChanged = !existing.cursor && !!state.cursor || !!existing.cursor && !state.cursor || !!existing.cursor && !!state.cursor && (existing.cursor.anchor !== state.cursor.anchor || existing.cursor.head !== state.cursor.head);
+        const fileChanged = existing.activeFile !== state.activeFile;
+        const userChanged = existing.user.name !== state.user?.name || existing.user.color !== state.user?.color || existing.user.role !== state.user?.role;
+        existing.lastActive = now;
+        if (cursorChanged || fileChanged || userChanged) {
+          existing.activeFile = state.activeFile;
+          existing.cursor = state.cursor;
+          if (state.user) {
+            existing.user = { ...existing.user, ...state.user };
+          }
+          hasChanged = true;
+        }
+      }
     }
-    this.notify();
+    if (hasChanged) {
+      this.notify();
+    }
   }
   removePeer(clientId) {
     if (this.remotePeers.delete(clientId)) {
@@ -162,6 +186,7 @@ var import_view = require("@codemirror/view");
 var remoteSyncAnnotation = import_state.Annotation.define();
 var setReadOnlyEffect = import_state.StateEffect.define();
 var awarenessEffect = import_state.StateEffect.define();
+var rebindEffect = import_state.StateEffect.define();
 var readOnlyField = import_state.StateField.define({
   create: () => false,
   update: (val, tr) => {
@@ -252,6 +277,8 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         this.yTextObserver = null;
         this.isDispatchingRemote = false;
         this.awarenessScheduled = false;
+        this.lastPeerFingerprint = "";
+        this.bindActiveYDoc();
         this.decorations = this.buildDecorations(view);
         this.unsubscribeAwareness = awareness.subscribe(() => {
           if (this.view.dom && this.view.dom.isConnected) {
@@ -260,16 +287,40 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         });
         this.updateBanner(view);
         this.syncReadOnlyState(view);
-        this.bindActiveYDoc();
+      }
+      getPeersFingerprint(currentPath) {
+        const peers = awareness.getActivePeersForFile(currentPath);
+        if (peers.length === 0)
+          return "";
+        let fp = "";
+        for (const p of peers) {
+          fp += `${p.clientId}:${p.cursor?.anchor},${p.cursor?.head}:${p.user.color}:${p.user.name};`;
+        }
+        return fp;
       }
       scheduleAwarenessUpdate() {
+        if (!this.view.dom || !this.view.dom.isConnected)
+          return;
+        const currentPath = this.boundPath || getActiveFilePath(this.view);
+        if (!currentPath)
+          return;
+        const newFp = this.getPeersFingerprint(currentPath);
+        if (newFp === this.lastPeerFingerprint) {
+          return;
+        }
         if (this.awarenessScheduled)
           return;
         this.awarenessScheduled = true;
         window.requestAnimationFrame(() => {
           this.awarenessScheduled = false;
           if (this.view.dom && this.view.dom.isConnected) {
-            this.decorations = this.buildDecorations(this.view);
+            const path = this.boundPath || getActiveFilePath(this.view);
+            if (!path)
+              return;
+            const currentFp = this.getPeersFingerprint(path);
+            if (currentFp === this.lastPeerFingerprint)
+              return;
+            this.lastPeerFingerprint = currentFp;
             this.view.dispatch({
               effects: [awarenessEffect.of()]
             });
@@ -364,15 +415,26 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         yText.observe(this.yTextObserver);
       }
       update(update) {
-        if (!this.boundPath || update.viewportChanged || update.view.hasFocus) {
+        const hasRebindEffect = update.transactions.some(
+          (tr) => tr.effects.some((e) => e.is(rebindEffect))
+        );
+        if (!this.boundPath || hasRebindEffect || update.focusChanged && update.view.hasFocus) {
           this.bindActiveYDoc();
         }
-        this.syncReadOnlyState(update.view);
+        const hasReadOnlyEffect = update.transactions.some(
+          (tr) => tr.effects.some((e) => e.is(setReadOnlyEffect))
+        );
+        if (hasReadOnlyEffect || update.focusChanged) {
+          this.syncReadOnlyState(update.view);
+          this.updateBanner(update.view);
+        }
         const hasAwarenessEffect = update.transactions.some(
           (tr) => tr.effects.some((e) => e.is(awarenessEffect))
         );
-        if (update.docChanged || update.viewportChanged || update.selectionSet || hasAwarenessEffect) {
+        if (hasAwarenessEffect) {
           this.decorations = this.buildDecorations(update.view);
+        } else if (update.docChanged && this.decorations !== import_view.Decoration.none) {
+          this.decorations = this.decorations.map(update.changes);
         }
         if (update.docChanged && !this.isDispatchingRemote) {
           const isRemote = update.transactions.some((tr) => tr.annotation(remoteSyncAnnotation));
@@ -401,9 +463,8 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (update.selectionSet && (update.view.hasFocus || update.docChanged)) {
           const main = update.state.selection.main;
           if (typeof main.anchor === "number" && typeof main.head === "number" && !isNaN(main.anchor) && !isNaN(main.head)) {
-            const path = getActiveFilePath(update.view);
-            if (path && awareness.getLocalState().activeFile !== path) {
-              awareness.updateActiveFile(path);
+            if (this.boundPath && awareness.getLocalState().activeFile !== this.boundPath) {
+              awareness.updateActiveFile(this.boundPath);
             }
             awareness.updateCursor({
               anchor: main.anchor,
@@ -411,7 +472,6 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             });
           }
         }
-        this.updateBanner(update.view);
       }
       updateBanner(view) {
         const readOnly = isReadOnly();
@@ -446,7 +506,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         }
       }
       buildDecorations(view) {
-        const currentPath = getActiveFilePath(view);
+        const currentPath = this.boundPath || getActiveFilePath(view);
         if (!currentPath)
           return import_view.Decoration.none;
         const peers = awareness.getActivePeersForFile(currentPath);
@@ -9231,14 +9291,23 @@ glo[importIdentifier] = true;
 
 // src/utils.ts
 function uint8ArrayToBase64(bytes) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  }
+  const CHUNK_SIZE = 8192;
+  const len = bytes.length;
   let binary = "";
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < len; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
+    binary += String.fromCharCode.apply(null, chunk);
   }
   return btoa(binary);
 }
 function base64ToUint8Array(base64) {
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(base64, "base64");
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
   const binaryString = atob(base64);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
@@ -9298,16 +9367,22 @@ var SyncEngine = class {
     }
     list.push(update);
     if (!this.pendingOutgoingTimers.has(path)) {
-      const timer = window.setTimeout(() => {
+      const timer = window.setTimeout ? window.setTimeout(() => {
         this.flushOutgoingYjsUpdate(path);
-      }, 25);
+      }, 30) : setTimeout(() => {
+        this.flushOutgoingYjsUpdate(path);
+      }, 30);
       this.pendingOutgoingTimers.set(path, timer);
     }
   }
   flushOutgoingYjsUpdate(path) {
     const timer = this.pendingOutgoingTimers.get(path);
-    if (timer) {
-      window.clearTimeout(timer);
+    if (timer !== void 0) {
+      if (typeof window !== "undefined" && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
       this.pendingOutgoingTimers.delete(path);
     }
     const updates = this.pendingOutgoingUpdates.get(path);
@@ -9320,13 +9395,19 @@ var SyncEngine = class {
       type: "local_update",
       path,
       sizeBytes: merged.length,
-      summary: `Sent local CRDT update (${merged.length} bytes)`
+      summary: `Sent local CRDT update (${merged.length} bytes${updates.length > 1 ? `, ${updates.length} batched` : ""})`
     });
     this.wsClient.send({
       type: "yjs_sync",
       path,
       update: b64
     });
+  }
+  flushAllOutgoingUpdates() {
+    const paths = Array.from(this.pendingOutgoingUpdates.keys());
+    for (const p of paths) {
+      this.flushOutgoingYjsUpdate(p);
+    }
   }
   getOrCreateDoc(path, initialContent) {
     let doc2 = this.docs.get(path);
@@ -9343,18 +9424,7 @@ var SyncEngine = class {
           console.warn(`[Kurotsuki] Sync blocked: Vault is in read-only mode for ${path}`);
           return;
         }
-        const b64 = uint8ArrayToBase64(update);
-        this.recordHistory({
-          type: "local_update",
-          path,
-          sizeBytes: update.length,
-          summary: `Sent local CRDT update (${update.length} bytes)`
-        });
-        this.wsClient.send({
-          type: "yjs_sync",
-          path,
-          update: b64
-        });
+        this.queueOutgoingYjsUpdate(path, update);
       });
       this.docs.set(path, doc2);
     }
@@ -9729,9 +9799,20 @@ var SyncEngine = class {
   debounceDiskWrite(path, doc2) {
     const existing = this.pendingLocalDebounce.get(path);
     if (existing) {
-      window.clearTimeout(existing);
+      if (typeof window !== "undefined" && window.clearTimeout) {
+        window.clearTimeout(existing);
+      } else {
+        clearTimeout(existing);
+      }
     }
-    const timer = window.setTimeout(async () => {
+    const timer = window.setTimeout ? window.setTimeout(async () => {
+      this.pendingLocalDebounce.delete(path);
+      if (this.isOpenInEditor(path)) {
+        return;
+      }
+      const text2 = doc2.getText("content").toString();
+      await this.writeToVaultSafely(path, text2);
+    }, 1500) : setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
       if (this.isOpenInEditor(path)) {
         return;
@@ -9742,9 +9823,14 @@ var SyncEngine = class {
     this.pendingLocalDebounce.set(path, timer);
   }
   async flushDocToDisk(path) {
+    this.flushOutgoingYjsUpdate(path);
     const timer = this.pendingLocalDebounce.get(path);
     if (timer) {
-      window.clearTimeout(timer);
+      if (typeof window !== "undefined" && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
       this.pendingLocalDebounce.delete(path);
     }
     const doc2 = this.docs.get(path);
@@ -9887,7 +9973,7 @@ var SyncEngine = class {
     };
     this.historyLogs.unshift(item);
     if (this.historyLogs.length > 200) {
-      this.historyLogs = this.historyLogs.slice(0, 200);
+      this.historyLogs.pop();
     }
   }
   getHistoryLogs() {
@@ -9897,12 +9983,21 @@ var SyncEngine = class {
     this.historyLogs = [];
   }
   resetDocs() {
+    this.flushAllOutgoingUpdates();
     for (const timer of this.pendingLocalDebounce.values()) {
-      window.clearTimeout(timer);
+      if (typeof window !== "undefined" && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
     }
     this.pendingLocalDebounce.clear();
     for (const timer of this.pendingOutgoingTimers.values()) {
-      window.clearTimeout(timer);
+      if (typeof window !== "undefined" && window.clearTimeout) {
+        window.clearTimeout(timer);
+      } else {
+        clearTimeout(timer);
+      }
     }
     this.pendingOutgoingTimers.clear();
     this.pendingOutgoingUpdates.clear();
@@ -10534,6 +10629,11 @@ var KurotsukiWSClient = class {
       }
       return false;
     }
+    return this.sendDirect(msg);
+  }
+  sendDirect(msg) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN)
+      return false;
     try {
       this.ws.send(JSON.stringify(msg));
       return true;
@@ -10545,15 +10645,49 @@ var KurotsukiWSClient = class {
   flushOutgoingQueue() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN)
       return;
+    const coalesced = [];
+    const syncUpdatesByPath = /* @__PURE__ */ new Map();
     while (this.outgoingQueue.length > 0) {
       const msg = this.outgoingQueue.shift();
-      if (msg) {
-        try {
-          this.ws.send(JSON.stringify(msg));
-        } catch (err) {
-          console.error("[Kurotsuki] Failed to flush queued message:", err);
-          break;
+      if (!msg)
+        continue;
+      if (msg.type === "yjs_sync") {
+        let list = syncUpdatesByPath.get(msg.path);
+        if (!list) {
+          list = [];
+          syncUpdatesByPath.set(msg.path, list);
+          coalesced.push(msg);
         }
+        list.push(msg.update);
+      } else {
+        coalesced.push(msg);
+      }
+    }
+    for (const msg of coalesced) {
+      if (msg.type === "yjs_sync") {
+        const updatesB64 = syncUpdatesByPath.get(msg.path);
+        if (updatesB64 && updatesB64.length > 0) {
+          syncUpdatesByPath.delete(msg.path);
+          if (updatesB64.length === 1) {
+            this.sendDirect(msg);
+          } else {
+            try {
+              const u8List = updatesB64.map((b64) => base64ToUint8Array(b64));
+              const merged = mergeUpdates(u8List);
+              this.sendDirect({
+                type: "yjs_sync",
+                path: msg.path,
+                update: uint8ArrayToBase64(merged)
+              });
+            } catch {
+              for (const b64 of updatesB64) {
+                this.sendDirect({ type: "yjs_sync", path: msg.path, update: b64 });
+              }
+            }
+          }
+        }
+      } else {
+        this.sendDirect(msg);
       }
     }
   }
@@ -10638,8 +10772,10 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.lastRenderedStatusDot = "";
     this.awarenessBroadcastInterval = null;
-    this.awarenessDebounceTimer = null;
+    this.awarenessTrailingTimer = null;
+    this.lastAwarenessBroadcastTime = 0;
     this.lastReadOnlyNoticeTime = 0;
   }
   async onload() {
@@ -10712,6 +10848,16 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         this.awareness.updateActiveFile(fileOrLeafPath);
         this.broadcastLocalAwareness();
       }
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.editor) {
+          const host = leaf.view.editor;
+          if (host.cm && typeof host.cm.dispatch === "function") {
+            host.cm.dispatch({
+              effects: [rebindEffect.of()]
+            });
+          }
+        }
+      });
     };
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
@@ -10839,8 +10985,9 @@ ${p.split("/").pop()}`);
     if (this.awarenessBroadcastInterval !== null) {
       window.clearInterval(this.awarenessBroadcastInterval);
     }
-    if (this.awarenessDebounceTimer !== null) {
-      window.clearTimeout(this.awarenessDebounceTimer);
+    if (this.awarenessTrailingTimer !== null) {
+      window.clearTimeout(this.awarenessTrailingTimer);
+      this.awarenessTrailingTimer = null;
     }
     this.wsClient.disconnect(true);
     this.syncEngine.destroy();
@@ -10873,6 +11020,11 @@ ${p.split("/").pop()}`);
     }
   }
   broadcastLocalAwareness() {
+    if (this.awarenessTrailingTimer !== null) {
+      window.clearTimeout(this.awarenessTrailingTimer);
+      this.awarenessTrailingTimer = null;
+    }
+    this.lastAwarenessBroadcastTime = Date.now();
     const local = this.awareness.getLocalState();
     this.wsClient.send({
       type: "awareness_update",
@@ -10880,25 +11032,37 @@ ${p.split("/").pop()}`);
     });
   }
   debouncedBroadcastAwareness() {
-    if (this.awarenessDebounceTimer !== null) {
-      window.clearTimeout(this.awarenessDebounceTimer);
-    }
-    this.awarenessDebounceTimer = window.setTimeout(() => {
-      this.awarenessDebounceTimer = null;
-      if (this.wsClient.getStatus() === "connected") {
-        this.broadcastLocalAwareness();
+    const now = Date.now();
+    const elapsed = now - this.lastAwarenessBroadcastTime;
+    const THROTTLE_MS = 120;
+    if (elapsed >= THROTTLE_MS) {
+      this.broadcastLocalAwareness();
+    } else {
+      if (this.awarenessTrailingTimer !== null) {
+        window.clearTimeout(this.awarenessTrailingTimer);
       }
-    }, 40);
+      this.awarenessTrailingTimer = window.setTimeout(() => {
+        this.awarenessTrailingTimer = null;
+        if (this.wsClient.getStatus() === "connected") {
+          this.broadcastLocalAwareness();
+        }
+      }, THROTTLE_MS - elapsed);
+    }
   }
   setupStatusBar() {
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("kurotsuki-status-bar");
+    this.statusBarDotEl = this.statusBarEl.createSpan({ cls: "kurotsuki-status-dot kurotsuki-status-disconnected" });
+    this.statusBarTextEl = this.statusBarEl.createSpan({ text: "Kurotsuki (Offline)" });
+    this.lastRenderedStatusDot = "disconnected";
     const updateBar = () => {
-      this.statusBarEl.empty();
       const status = this.wsClient.getStatus();
       const role = this.wsClient.getCurrentRole();
       const latency = this.wsClient.getLatency();
-      this.statusBarEl.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+      if (this.lastRenderedStatusDot !== status) {
+        this.statusBarDotEl.className = `kurotsuki-status-dot kurotsuki-status-${status}`;
+        this.lastRenderedStatusDot = status;
+      }
       const currentFile = this.app.workspace.getActiveFile();
       const peersInFile = currentFile ? this.awareness.getActivePeersForFile(currentFile.path).length : 0;
       let label = "Kurotsuki";
@@ -10914,7 +11078,9 @@ ${p.split("/").pop()}`);
       } else {
         label = "Kurotsuki (Offline)";
       }
-      this.statusBarEl.createSpan({ text: label });
+      if (this.statusBarTextEl.textContent !== label) {
+        this.statusBarTextEl.textContent = label;
+      }
     };
     this.wsClient.onStatusChange((status) => {
       updateBar();
@@ -10947,21 +11113,39 @@ ${p.split("/").pop()}`);
     });
   }
   getPathForView(view) {
-    if (view && view.dom) {
+    if (view) {
+      const activeMarkdown = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+      if (activeMarkdown?.file) {
+        const host = activeMarkdown.editor;
+        if (host?.cm === view || host?.cm?.dom === view.dom) {
+          return activeMarkdown.file.path;
+        }
+      }
       let foundPath = null;
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
           const host = leaf.view.editor;
           if (host?.cm === view || host?.cm?.dom === view.dom) {
             foundPath = leaf.view.file.path;
-          } else if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom) || leaf.view.containerEl && leaf.view.containerEl.contains(view.dom)) {
-            foundPath = leaf.view.file.path;
           }
         }
       });
       if (foundPath)
         return foundPath;
-      const activeMarkdown = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+      if (view.dom) {
+        if (activeMarkdown?.file && (activeMarkdown.contentEl?.contains(view.dom) || activeMarkdown.containerEl?.contains(view.dom))) {
+          return activeMarkdown.file.path;
+        }
+        this.app.workspace.iterateAllLeaves((leaf) => {
+          if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
+            if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom) || leaf.view.containerEl && leaf.view.containerEl.contains(view.dom)) {
+              foundPath = leaf.view.file.path;
+            }
+          }
+        });
+        if (foundPath)
+          return foundPath;
+      }
       if (activeMarkdown?.file) {
         return activeMarkdown.file.path;
       }

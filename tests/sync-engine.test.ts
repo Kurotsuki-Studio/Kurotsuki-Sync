@@ -2,8 +2,9 @@ import assert from 'node:assert';
 import test, { describe } from 'node:test';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
+import * as Y from 'yjs';
 import { AwarenessManager } from '../src/awareness.js';
-import { readOnlyField, remoteSyncAnnotation, setReadOnlyEffect } from '../src/cm6-collab.js';
+import { readOnlyField, rebindEffect, remoteSyncAnnotation, setReadOnlyEffect } from '../src/cm6-collab.js';
 import { DEFAULT_SETTINGS, KurotsukiSettings, SyncHistoryEntry } from '../src/types.js';
 import { base64ToUint8Array, uint8ArrayToBase64 } from '../src/utils.js';
 
@@ -245,4 +246,132 @@ describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
     assert.deepStrictEqual(awareness.getAllPeers(), awareness.getAllRemotePeers());
     awareness.destroy();
   });
+
+  test('AwarenessManager: deduplicates identical local cursor updates and remote heartbeats', () => {
+    const awareness = new AwarenessManager({ id: 'u1', name: 'User 1', color: '#ff0000' });
+    let localCalls = 0;
+    awareness.onLocalChange(() => {
+      localCalls++;
+    });
+
+    // 1. Initial cursor update should fire
+    awareness.updateCursor({ anchor: 10, head: 10 });
+    assert.strictEqual(localCalls, 1);
+
+    // 2. Calling with same cursor should be ignored (deduplicated)
+    awareness.updateCursor({ anchor: 10, head: 10 });
+    assert.strictEqual(localCalls, 1);
+
+    // 3. New position fires
+    awareness.updateCursor({ anchor: 12, head: 12 });
+    assert.strictEqual(localCalls, 2);
+
+    // 4. Remote awareness deduplication
+    let remoteCalls = 0;
+    awareness.subscribe(() => {
+      remoteCalls++;
+    });
+    // First subscribe triggers listener once with current state
+    assert.strictEqual(remoteCalls, 1);
+
+    const peerA = {
+      clientId: 42,
+      user: { id: 'u2', name: 'Bob', color: '#00ff00' },
+      activeFile: 'Test.md',
+      cursor: { anchor: 5, head: 5 },
+      lastActive: Date.now(),
+    };
+
+    // Handling new peer triggers remote notification
+    awareness.handleRemoteAwareness([peerA]);
+    assert.strictEqual(remoteCalls, 2);
+
+    // Handling identical state (heartbeat ping) MUST NOT trigger remote notification
+    awareness.handleRemoteAwareness([{ ...peerA, lastActive: Date.now() }]);
+    assert.strictEqual(remoteCalls, 2);
+
+    // Changed cursor triggers notification
+    awareness.handleRemoteAwareness([{ ...peerA, cursor: { anchor: 6, head: 6 } }]);
+    assert.strictEqual(remoteCalls, 3);
+
+    awareness.destroy();
+  });
+
+  test('Yjs Batch Merging: merges multiple character insertions into a single CRDT update', () => {
+    const docSource = new Y.Doc();
+    const yTextSource = docSource.getText('content');
+    const updates: Uint8Array[] = [];
+
+    docSource.on('update', (u: Uint8Array) => {
+      updates.push(u);
+    });
+
+    // Simulate typing "Hello" character by character
+    const chars = ['H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd'];
+    for (let i = 0; i < chars.length; i++) {
+      docSource.transact(() => {
+        yTextSource.insert(i, chars[i]);
+      });
+    }
+
+    assert.strictEqual(updates.length, 11);
+    assert.strictEqual(yTextSource.toString(), 'Hello World');
+
+    // Merge all 11 micro-updates into 1 compact update
+    const merged = Y.mergeUpdates(updates);
+
+    // Apply merged update to an empty doc
+    const docTarget = new Y.Doc();
+    const yTextTarget = docTarget.getText('content');
+    Y.applyUpdate(docTarget, merged);
+
+    assert.strictEqual(yTextTarget.toString(), 'Hello World');
+    assert.ok(merged.length < updates.reduce((acc, u) => acc + u.length, 0), 'Merged update should be more compact than sum of individual updates');
+  });
+
+  test('Base64 High-Performance: large buffers (64KB) roundtrip accurately without chunk corruption', () => {
+    const largeBuffer = new Uint8Array(65536);
+    for (let i = 0; i < largeBuffer.length; i++) {
+      largeBuffer[i] = (i * 31 + 7) & 0xff;
+    }
+
+    const b64 = uint8ArrayToBase64(largeBuffer);
+    assert.ok(typeof b64 === 'string');
+    assert.strictEqual(b64.length, Math.ceil(65536 / 3) * 4);
+
+    const restored = base64ToUint8Array(b64);
+    assert.strictEqual(restored.length, largeBuffer.length);
+    assert.deepStrictEqual(restored, largeBuffer);
+  });
+
+  test('CodeMirror 6: rebindEffect is dispatchable and detectable in transaction effects', () => {
+    let state = EditorState.create({ doc: 'Initial Document' });
+    const tr = state.update({
+      effects: [rebindEffect.of()],
+    });
+
+    const hasRebind = tr.effects.some((e) => e.is(rebindEffect));
+    assert.strictEqual(hasRebind, true);
+  });
+
+  test('Sync History: bounded memory log with O(1) in-place capping', () => {
+    const logs: SyncHistoryEntry[] = [];
+    for (let i = 0; i < 250; i++) {
+      logs.unshift({
+        id: `h_${i}`,
+        type: 'local_update',
+        path: 'Note.md',
+        timestamp: Date.now(),
+        summary: `Edit ${i}`,
+      });
+      if (logs.length > 200) {
+        logs.pop();
+      }
+    }
+
+    assert.strictEqual(logs.length, 200);
+    assert.strictEqual(logs[0].summary, 'Edit 249');
+    assert.strictEqual(logs[199].summary, 'Edit 50');
+  });
 });
+

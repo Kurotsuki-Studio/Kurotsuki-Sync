@@ -52,23 +52,62 @@ export class AwarenessManager {
   }
 
   public updateCursor(cursor: RemoteCursor | null): void {
+    const prev = this.localState.cursor;
+    if (
+      (prev === null && cursor === null) ||
+      (prev !== null && cursor !== null && prev.anchor === cursor.anchor && prev.head === cursor.head)
+    ) {
+      return;
+    }
     this.localState.cursor = cursor;
     this.localState.lastActive = Date.now();
-    // Only notify local WebSocket broadcast (debounced)
+    // Only notify local WebSocket broadcast (debounced/throttled)
     // Avoid triggering full remote re-renders on local typing
     this.notifyLocal();
   }
 
   public handleRemoteAwareness(states: PeerAwarenessState[]): void {
     const now = Date.now();
+    let hasChanged = false;
+
     for (const state of states) {
       if (state.clientId === this.localState.clientId) continue;
-      this.remotePeers.set(state.clientId, {
-        ...state,
-        lastActive: now,
-      });
+
+      const existing = this.remotePeers.get(state.clientId);
+      if (!existing) {
+        this.remotePeers.set(state.clientId, {
+          ...state,
+          lastActive: now,
+        });
+        hasChanged = true;
+      } else {
+        const cursorChanged =
+          (!existing.cursor && !!state.cursor) ||
+          (!!existing.cursor && !state.cursor) ||
+          (!!existing.cursor &&
+            !!state.cursor &&
+            (existing.cursor.anchor !== state.cursor.anchor || existing.cursor.head !== state.cursor.head));
+        const fileChanged = existing.activeFile !== state.activeFile;
+        const userChanged =
+          existing.user.name !== state.user?.name ||
+          existing.user.color !== state.user?.color ||
+          existing.user.role !== state.user?.role;
+
+        existing.lastActive = now;
+        if (cursorChanged || fileChanged || userChanged) {
+          existing.activeFile = state.activeFile;
+          existing.cursor = state.cursor;
+          if (state.user) {
+            existing.user = { ...existing.user, ...state.user };
+          }
+          hasChanged = true;
+        }
+      }
     }
-    this.notify();
+
+    if (hasChanged) {
+      this.notify();
+    }
   }
 
   public removePeer(clientId: number): void {

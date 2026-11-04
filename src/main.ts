@@ -1,7 +1,7 @@
 import { Editor, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { EditorView } from '@codemirror/view';
 import { AwarenessManager } from './awareness';
-import { createCollabExtension, setReadOnlyEffect } from './cm6-collab';
+import { createCollabExtension, rebindEffect, setReadOnlyEffect } from './cm6-collab';
 import { KurotsukiSettingTab } from './settings';
 import { SyncEngine } from './sync-engine';
 import { DEFAULT_SETTINGS, KurotsukiSettings, UserProfile, UserRole, WSMessage } from './types';
@@ -22,8 +22,12 @@ export default class KurotsukiSyncPlugin extends Plugin {
   syncEngine!: SyncEngine;
   awareness!: AwarenessManager;
   private statusBarEl!: HTMLElement;
+  private statusBarDotEl!: HTMLElement;
+  private statusBarTextEl!: HTMLElement;
+  private lastRenderedStatusDot = '';
   private awarenessBroadcastInterval: number | null = null;
-  private awarenessDebounceTimer: number | null = null;
+  private awarenessTrailingTimer: number | null = null;
+  private lastAwarenessBroadcastTime = 0;
   private lastReadOnlyNoticeTime = 0;
 
   async onload() {
@@ -119,6 +123,17 @@ export default class KurotsukiSyncPlugin extends Plugin {
         this.awareness.updateActiveFile(fileOrLeafPath);
         this.broadcastLocalAwareness();
       }
+      // Notify CM6 editor plugins in open leaves to rebind to current active document
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view instanceof MarkdownView && leaf.view.editor) {
+          const host = leaf.view.editor as unknown as CMEditorHost;
+          if (host.cm && typeof host.cm.dispatch === 'function') {
+            host.cm.dispatch({
+              effects: [rebindEffect.of()],
+            });
+          }
+        }
+      });
     };
 
     this.registerEvent(
@@ -267,8 +282,9 @@ export default class KurotsukiSyncPlugin extends Plugin {
     if (this.awarenessBroadcastInterval !== null) {
       window.clearInterval(this.awarenessBroadcastInterval);
     }
-    if (this.awarenessDebounceTimer !== null) {
-      window.clearTimeout(this.awarenessDebounceTimer);
+    if (this.awarenessTrailingTimer !== null) {
+      window.clearTimeout(this.awarenessTrailingTimer);
+      this.awarenessTrailingTimer = null;
     }
     this.wsClient.disconnect(true);
     this.syncEngine.destroy();
@@ -307,6 +323,11 @@ export default class KurotsukiSyncPlugin extends Plugin {
   }
 
   private broadcastLocalAwareness(): void {
+    if (this.awarenessTrailingTimer !== null) {
+      window.clearTimeout(this.awarenessTrailingTimer);
+      this.awarenessTrailingTimer = null;
+    }
+    this.lastAwarenessBroadcastTime = Date.now();
     const local = this.awareness.getLocalState();
     this.wsClient.send({
       type: 'awareness_update',
@@ -315,28 +336,43 @@ export default class KurotsukiSyncPlugin extends Plugin {
   }
 
   private debouncedBroadcastAwareness(): void {
-    if (this.awarenessDebounceTimer !== null) {
-      window.clearTimeout(this.awarenessDebounceTimer);
-    }
-    this.awarenessDebounceTimer = window.setTimeout(() => {
-      this.awarenessDebounceTimer = null;
-      if (this.wsClient.getStatus() === 'connected') {
-        this.broadcastLocalAwareness();
+    const now = Date.now();
+    const elapsed = now - this.lastAwarenessBroadcastTime;
+    const THROTTLE_MS = 120; // At most ~8 updates/sec during continuous typing
+
+    if (elapsed >= THROTTLE_MS) {
+      this.broadcastLocalAwareness();
+    } else {
+      if (this.awarenessTrailingTimer !== null) {
+        window.clearTimeout(this.awarenessTrailingTimer);
       }
-    }, 40);
+      this.awarenessTrailingTimer = window.setTimeout(() => {
+        this.awarenessTrailingTimer = null;
+        if (this.wsClient.getStatus() === 'connected') {
+          this.broadcastLocalAwareness();
+        }
+      }, THROTTLE_MS - elapsed);
+    }
   }
 
   private setupStatusBar(): void {
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass('kurotsuki-status-bar');
 
+    this.statusBarDotEl = this.statusBarEl.createSpan({ cls: 'kurotsuki-status-dot kurotsuki-status-disconnected' });
+    this.statusBarTextEl = this.statusBarEl.createSpan({ text: 'Kurotsuki (Offline)' });
+    this.lastRenderedStatusDot = 'disconnected';
+
     const updateBar = () => {
-      this.statusBarEl.empty();
       const status = this.wsClient.getStatus();
       const role = this.wsClient.getCurrentRole();
       const latency = this.wsClient.getLatency();
 
-      this.statusBarEl.createSpan({ cls: `kurotsuki-status-dot kurotsuki-status-${status}` });
+      if (this.lastRenderedStatusDot !== status) {
+        this.statusBarDotEl.className = `kurotsuki-status-dot kurotsuki-status-${status}`;
+        this.lastRenderedStatusDot = status;
+      }
+
       const currentFile = this.app.workspace.getActiveFile();
       const peersInFile = currentFile ? this.awareness.getActivePeersForFile(currentFile.path).length : 0;
 
@@ -354,7 +390,9 @@ export default class KurotsukiSyncPlugin extends Plugin {
         label = 'Kurotsuki (Offline)';
       }
 
-      this.statusBarEl.createSpan({ text: label });
+      if (this.statusBarTextEl.textContent !== label) {
+        this.statusBarTextEl.textContent = label;
+      }
     };
 
     this.wsClient.onStatusChange((status) => {
@@ -391,25 +429,50 @@ export default class KurotsukiSyncPlugin extends Plugin {
   }
 
   public getPathForView(view?: EditorView): string | null {
-    if (view && view.dom) {
+    if (view) {
+      // Fast path 1: check active markdown view (instant reference comparison, no DOM walk)
+      const activeMarkdown = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (activeMarkdown?.file) {
+        const host = activeMarkdown.editor as unknown as CMEditorHost;
+        if (host?.cm === view || host?.cm?.dom === view.dom) {
+          return activeMarkdown.file.path;
+        }
+      }
+
+      // Fast path 2: check other open workspace leaves by reference equality
       let foundPath: string | null = null;
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (!foundPath && leaf.view instanceof MarkdownView && leaf.view.file) {
           const host = leaf.view.editor as unknown as CMEditorHost;
           if (host?.cm === view || host?.cm?.dom === view.dom) {
             foundPath = leaf.view.file.path;
-          } else if (
-            (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) ||
-            (leaf.view.containerEl && leaf.view.containerEl.contains(view.dom))
-          ) {
-            foundPath = leaf.view.file.path;
           }
         }
       });
       if (foundPath) return foundPath;
 
-      // On mobile or before view.dom is connected into leaf container, fallback to active markdown view
-      const activeMarkdown = this.app.workspace.getActiveViewOfType(MarkdownView);
+      // Fallback: only if direct cm reference was not found, check DOM contains as fallback
+      if (view.dom) {
+        if (
+          activeMarkdown?.file &&
+          (activeMarkdown.contentEl?.contains(view.dom) || activeMarkdown.containerEl?.contains(view.dom))
+        ) {
+          return activeMarkdown.file.path;
+        }
+
+        this.app.workspace.iterateAllLeaves((leaf) => {
+          if (!foundPath && leaf.view instanceof MarkdownView && leaf.view.file) {
+            if (
+              (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) ||
+              (leaf.view.containerEl && leaf.view.containerEl.contains(view.dom))
+            ) {
+              foundPath = leaf.view.file.path;
+            }
+          }
+        });
+        if (foundPath) return foundPath;
+      }
+
       if (activeMarkdown?.file) {
         return activeMarkdown.file.path;
       }

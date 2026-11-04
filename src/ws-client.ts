@@ -1,4 +1,6 @@
+import * as Y from 'yjs';
 import { ConnectionStatus, KurotsukiSettings, UserProfile, UserRole, WSMessage } from './types';
+import { base64ToUint8Array, uint8ArrayToBase64 } from './utils';
 
 export type WSMessageHandler = (message: WSMessage) => void;
 export type StatusChangeHandler = (status: ConnectionStatus, message?: string) => void;
@@ -180,6 +182,11 @@ export class KurotsukiWSClient {
       }
       return false;
     }
+    return this.sendDirect(msg);
+  }
+
+  private sendDirect(msg: WSMessage): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     try {
       this.ws.send(JSON.stringify(msg));
       return true;
@@ -191,15 +198,53 @@ export class KurotsukiWSClient {
 
   private flushOutgoingQueue(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    // Coalesce buffered yjs_sync updates for the same document path
+    const coalesced: WSMessage[] = [];
+    const syncUpdatesByPath: Map<string, string[]> = new Map();
+
     while (this.outgoingQueue.length > 0) {
       const msg = this.outgoingQueue.shift();
-      if (msg) {
-        try {
-          this.ws.send(JSON.stringify(msg));
-        } catch (err) {
-          console.error('[Kurotsuki] Failed to flush queued message:', err);
-          break;
+      if (!msg) continue;
+
+      if (msg.type === 'yjs_sync') {
+        let list = syncUpdatesByPath.get(msg.path);
+        if (!list) {
+          list = [];
+          syncUpdatesByPath.set(msg.path, list);
+          coalesced.push(msg); // First placeholder preserves relative order
         }
+        list.push(msg.update);
+      } else {
+        coalesced.push(msg);
+      }
+    }
+
+    for (const msg of coalesced) {
+      if (msg.type === 'yjs_sync') {
+        const updatesB64 = syncUpdatesByPath.get(msg.path);
+        if (updatesB64 && updatesB64.length > 0) {
+          syncUpdatesByPath.delete(msg.path);
+          if (updatesB64.length === 1) {
+            this.sendDirect(msg);
+          } else {
+            try {
+              const u8List = updatesB64.map((b64) => base64ToUint8Array(b64));
+              const merged = Y.mergeUpdates(u8List);
+              this.sendDirect({
+                type: 'yjs_sync',
+                path: msg.path,
+                update: uint8ArrayToBase64(merged),
+              });
+            } catch {
+              for (const b64 of updatesB64) {
+                this.sendDirect({ type: 'yjs_sync', path: msg.path, update: b64 });
+              }
+            }
+          }
+        }
+      } else {
+        this.sendDirect(msg);
       }
     }
   }
