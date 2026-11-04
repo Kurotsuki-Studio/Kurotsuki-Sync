@@ -1,10 +1,10 @@
 import { App, MarkdownView, Notice, TAbstractFile, TFile, requestUrl } from 'obsidian';
 import * as Y from 'yjs';
 import { KurotsukiSettings, SyncHistoryEntry, WSMessage } from './types';
-import { base64ToUint8Array, uint8ArrayToBase64 } from './utils';
+import { base64ToUint8Array, normalizePath, uint8ArrayToBase64 } from './utils';
 import { KurotsukiWSClient } from './ws-client';
 
-export { base64ToUint8Array, uint8ArrayToBase64 } from './utils';
+export { base64ToUint8Array, normalizePath, uint8ArrayToBase64 } from './utils';
 
 export class SyncEngine {
   private app: App;
@@ -36,7 +36,7 @@ export class SyncEngine {
 
   public shouldSync(path: string): boolean {
     if (!path) return false;
-    const normalized = path.replace(/\\/g, '/');
+    const normalized = normalizePath(path);
 
     // Strict check: NEVER sync any hidden file or folder (e.g. .obsidian, .git, .trash, .smart-env)
     if (normalized.startsWith('.') || normalized.includes('/.') || normalized.includes('.obsidian')) {
@@ -44,7 +44,8 @@ export class SyncEngine {
     }
 
     const configDir = this.app.vault.configDir;
-    if (configDir && (normalized === configDir || normalized.startsWith(configDir + '/'))) {
+    const cleanConfig = configDir ? normalizePath(configDir) : null;
+    if (cleanConfig && (normalized === cleanConfig || normalized.startsWith(cleanConfig + '/'))) {
       return false;
     }
 
@@ -54,14 +55,14 @@ export class SyncEngine {
 
     // Selective mode: check if path begins with any shared folder
     return this.settings.sharedFolders.some((folder) => {
-      const cleanFolder = folder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const cleanFolder = normalizePath(folder);
       if (!cleanFolder) return false;
       return normalized === cleanFolder || normalized.startsWith(cleanFolder + '/');
     });
   }
 
-  public getDoc(path: string): Y.Doc | undefined {
-    return this.docs.get(path);
+  public getDoc(rawPath: string): Y.Doc | undefined {
+    return this.docs.get(normalizePath(rawPath));
   }
 
   private queueOutgoingYjsUpdate(path: string, update: Uint8Array): void {
@@ -121,7 +122,8 @@ export class SyncEngine {
     }
   }
 
-  public getOrCreateDoc(path: string, initialContent?: string): Y.Doc {
+  public getOrCreateDoc(rawPath: string, initialContent?: string): Y.Doc {
+    const path = normalizePath(rawPath);
     let doc = this.docs.get(path);
     if (!doc) {
       doc = new Y.Doc();
@@ -149,7 +151,19 @@ export class SyncEngine {
     return doc;
   }
 
-  public removeDoc(path: string): void {
+  public requestDocFromServer(rawPath: string): void {
+    const path = normalizePath(rawPath);
+    if (!this.shouldSync(path)) return;
+    if (this.wsClient.getStatus() === 'connected') {
+      this.wsClient.send({
+        type: 'doc_request',
+        path,
+      });
+    }
+  }
+
+  public removeDoc(rawPath: string): void {
+    const path = normalizePath(rawPath);
     const doc = this.docs.get(path);
     if (doc) {
       doc.destroy();
@@ -157,10 +171,11 @@ export class SyncEngine {
     }
   }
 
-  public isOpenInEditor(path: string): boolean {
+  public isOpenInEditor(rawPath: string): boolean {
+    const path = normalizePath(rawPath);
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view instanceof MarkdownView && leaf.view.file && leaf.view.file.path === path) {
+      if (leaf.view instanceof MarkdownView && leaf.view.file && normalizePath(leaf.view.file.path) === path) {
         open = true;
       }
     });
@@ -484,14 +499,41 @@ export class SyncEngine {
     }
   }
 
-  private async handleDocResponse(path: string, updateB64: string): Promise<void> {
+  private async handleDocResponse(rawPath: string, updateB64: string): Promise<void> {
+    const path = normalizePath(rawPath);
     if (!this.shouldSync(path)) return;
     const update = base64ToUint8Array(updateB64);
     const doc = this.getOrCreateDoc(path);
     Y.applyUpdate(doc, update, 'remote');
     this.trackSyncedFile(path);
+
+    const yText = doc.getText('content');
+
+    // If doc from server was completely empty, seed it from local file
+    if (yText.length === 0) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) {
+        try {
+          const content = await this.app.vault.read(file);
+          if (content.length > 0 && yText.length === 0) {
+            doc.transact(() => {
+              yText.insert(0, content);
+            }, 'seed');
+            const seedUpdate = Y.encodeStateAsUpdate(doc);
+            this.wsClient.send({
+              type: 'yjs_sync',
+              path,
+              update: uint8ArrayToBase64(seedUpdate),
+            });
+          }
+        } catch (e) {
+          console.error(`[Kurotsuki] Error seeding doc from local file ${path}:`, e);
+        }
+      }
+    }
+
     if (!this.isOpenInEditor(path)) {
-      const content = doc.getText('content').toString();
+      const content = yText.toString();
       // Only write to vault if content on disk is actually different
       const abstractFile = this.app.vault.getAbstractFileByPath(path);
       if (abstractFile instanceof TFile) {
@@ -531,7 +573,8 @@ export class SyncEngine {
     }
   }
 
-  private async handleRemoteYjsSync(path: string, updateB64: string): Promise<void> {
+  private async handleRemoteYjsSync(rawPath: string, updateB64: string): Promise<void> {
+    const path = normalizePath(rawPath);
     if (!this.shouldSync(path)) return;
 
     const update = base64ToUint8Array(updateB64);

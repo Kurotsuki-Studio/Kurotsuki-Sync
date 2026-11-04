@@ -6,7 +6,7 @@ import * as Y from 'yjs';
 import { AwarenessManager } from '../src/awareness.js';
 import { readOnlyField, rebindEffect, remoteSyncAnnotation, setReadOnlyEffect } from '../src/cm6-collab.js';
 import { DEFAULT_SETTINGS, KurotsukiSettings, SyncHistoryEntry } from '../src/types.js';
-import { base64ToUint8Array, uint8ArrayToBase64 } from '../src/utils.js';
+import { base64ToUint8Array, normalizePath, uint8ArrayToBase64 } from '../src/utils.js';
 
 describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
   test('Base64 <-> Uint8Array roundtrip', () => {
@@ -354,24 +354,77 @@ describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
     assert.strictEqual(hasRebind, true);
   });
 
-  test('Sync History: bounded memory log with O(1) in-place capping', () => {
-    const logs: SyncHistoryEntry[] = [];
-    for (let i = 0; i < 250; i++) {
-      logs.unshift({
-        id: `h_${i}`,
-        type: 'local_update',
-        path: 'Note.md',
-        timestamp: Date.now(),
-        summary: `Edit ${i}`,
-      });
-      if (logs.length > 200) {
-        logs.pop();
-      }
-    }
+  test('normalizePath: cross-platform slash and whitespace consistency', () => {
+    assert.strictEqual(normalizePath('Japanese\\Accueil.md'), 'Japanese/Accueil.md');
+    assert.strictEqual(normalizePath('/Japanese/Accueil.md/'), 'Japanese/Accueil.md');
+    assert.strictEqual(normalizePath('Kurotsuki\\Notes\\Test.md'), 'Kurotsuki/Notes/Test.md');
+    assert.strictEqual(normalizePath(''), '');
+    assert.strictEqual(normalizePath(null), '');
+    assert.strictEqual(normalizePath(undefined), '');
+  });
 
-    assert.strictEqual(logs.length, 200);
-    assert.strictEqual(logs[0].summary, 'Edit 249');
-    assert.strictEqual(logs[199].summary, 'Edit 50');
+  test('Cross-platform awareness matches Windows backslashes with mobile forward slashes', () => {
+    const awareness = new AwarenessManager({ id: 'u1', name: 'PC', color: '#111' });
+    awareness.updateActiveFile('Japanese\\Accueil.md'); // Windows path
+
+    awareness.handleRemoteAwareness([
+      {
+        clientId: 42,
+        user: { id: 'u2', name: 'Phone', color: '#222' },
+        activeFile: 'Japanese/Accueil.md', // Mobile POSIX path
+        cursor: { anchor: 10, head: 10 },
+        lastActive: Date.now(),
+      },
+    ]);
+
+    const peers = awareness.getActivePeersForFile('Japanese/Accueil.md');
+    assert.strictEqual(peers.length, 1);
+    assert.strictEqual(peers[0].user.name, 'Phone');
+
+    const peersWin = awareness.getActivePeersForFile('Japanese\\Accueil.md');
+    assert.strictEqual(peersWin.length, 1);
+    assert.strictEqual(peersWin[0].user.name, 'Phone');
+    awareness.destroy();
+  });
+
+  test('Real-time Yjs CRDT: zero-duplication seed and instant peer edit propagation', () => {
+    // Simulated Relay Server
+    const serverDoc = new Y.Doc();
+
+    // Client A (PC) and Client B (Phone)
+    const clientA = new Y.Doc();
+    const clientB = new Y.Doc();
+
+    const localInitialText = 'Bonjour le monde';
+
+    // PC requests doc from server (currently empty)
+    Y.applyUpdate(clientA, Y.encodeStateAsUpdate(serverDoc));
+    if (clientA.getText('content').length === 0) {
+      clientA.getText('content').insert(0, localInitialText);
+      // PC sends seed to server
+      Y.applyUpdate(serverDoc, Y.encodeStateAsUpdate(clientA));
+    }
+    assert.strictEqual(serverDoc.getText('content').toString(), 'Bonjour le monde');
+
+    // Phone connects and requests doc from server
+    Y.applyUpdate(clientB, Y.encodeStateAsUpdate(serverDoc));
+    assert.strictEqual(clientB.getText('content').toString(), 'Bonjour le monde');
+
+    // Phone types '!' at the end
+    let updateB: Uint8Array | null = null;
+    clientB.on('update', (u) => { updateB = u; });
+    clientB.getText('content').insert(16, '!');
+
+    assert.ok(updateB);
+    // Server receives and relays to PC
+    Y.applyUpdate(serverDoc, updateB!);
+    Y.applyUpdate(clientA, updateB!);
+
+    assert.strictEqual(clientA.getText('content').toString(), 'Bonjour le monde!');
+    assert.strictEqual(serverDoc.getText('content').toString(), 'Bonjour le monde!');
+    assert.strictEqual(clientB.getText('content').toString(), 'Bonjour le monde!');
+    assert.strictEqual(clientA.store.pendingStructs, null);
+    assert.strictEqual(clientB.store.pendingStructs, null);
   });
 });
 

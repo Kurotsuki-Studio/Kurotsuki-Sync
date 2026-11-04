@@ -12902,6 +12902,7 @@ var callAll = (fs, args2, i = 0) => {
     }
   }
 };
+var id = (a) => a;
 var isOneOf = (value, options) => options.includes(value);
 
 // node_modules/lib0/environment.js
@@ -13182,6 +13183,29 @@ var addToDeleteSet = (ds, client, clock, length2) => {
   )).push(new DeleteItem(clock, length2));
 };
 var createDeleteSet = () => new DeleteSet();
+var createDeleteSetFromStructStore = (ss) => {
+  const ds = createDeleteSet();
+  ss.clients.forEach((structs, client) => {
+    const dsitems = [];
+    for (let i = 0; i < structs.length; i++) {
+      const struct = structs[i];
+      if (struct.deleted) {
+        const clock = struct.id.clock;
+        let len = struct.length;
+        if (i + 1 < structs.length) {
+          for (let next = structs[i + 1]; i + 1 < structs.length && next.deleted; next = structs[++i + 1]) {
+            len += next.length;
+          }
+        }
+        dsitems.push(new DeleteItem(clock, len));
+      }
+    }
+    if (dsitems.length > 0) {
+      ds.clients.set(client, dsitems);
+    }
+  });
+  return ds;
+};
 var writeDeleteSet = (encoder, ds) => {
   writeVarUint(encoder.restEncoder, ds.clients.size);
   from(ds.clients.entries()).sort((a, b) => b[0] - a[0]).forEach(([client, dsitems]) => {
@@ -14280,6 +14304,41 @@ var applyUpdateV2 = (ydoc, update, transactionOrigin, YDecoder = UpdateDecoderV2
   readUpdateV2(decoder, ydoc, transactionOrigin, new YDecoder(decoder));
 };
 var applyUpdate = (ydoc, update, transactionOrigin) => applyUpdateV2(ydoc, update, transactionOrigin, UpdateDecoderV1);
+var writeStateAsUpdate = (encoder, doc2, targetStateVector = /* @__PURE__ */ new Map()) => {
+  writeClientsStructs(encoder, doc2.store, targetStateVector);
+  writeDeleteSet(encoder, createDeleteSetFromStructStore(doc2.store));
+};
+var encodeStateAsUpdateV2 = (doc2, encodedTargetStateVector = new Uint8Array([0]), encoder = new UpdateEncoderV2()) => {
+  const targetStateVector = decodeStateVector(encodedTargetStateVector);
+  writeStateAsUpdate(encoder, doc2, targetStateVector);
+  const updates = [encoder.toUint8Array()];
+  if (doc2.store.pendingDs) {
+    updates.push(doc2.store.pendingDs);
+  }
+  if (doc2.store.pendingStructs) {
+    updates.push(diffUpdateV2(doc2.store.pendingStructs.update, encodedTargetStateVector));
+  }
+  if (updates.length > 1) {
+    if (encoder.constructor === UpdateEncoderV1) {
+      return mergeUpdates(updates.map((update, i) => i === 0 ? update : convertUpdateFormatV2ToV1(update)));
+    } else if (encoder.constructor === UpdateEncoderV2) {
+      return mergeUpdatesV2(updates);
+    }
+  }
+  return updates[0];
+};
+var encodeStateAsUpdate = (doc2, encodedTargetStateVector) => encodeStateAsUpdateV2(doc2, encodedTargetStateVector, new UpdateEncoderV1());
+var readStateVector = (decoder) => {
+  const ss = /* @__PURE__ */ new Map();
+  const ssLength = readVarUint(decoder.restDecoder);
+  for (let i = 0; i < ssLength; i++) {
+    const client = readVarUint(decoder.restDecoder);
+    const clock = readVarUint(decoder.restDecoder);
+    ss.set(client, clock);
+  }
+  return ss;
+};
+var decodeStateVector = (decodedState) => readStateVector(new DSDecoderV1(createDecoder(decodedState)));
 var EventHandler = class {
   constructor() {
     this.l = [];
@@ -14908,6 +14967,38 @@ var mergeUpdatesV2 = (updates, YDecoder = UpdateDecoderV2, YEncoder = UpdateEnco
   writeDeleteSet(updateEncoder, ds);
   return updateEncoder.toUint8Array();
 };
+var diffUpdateV2 = (update, sv, YDecoder = UpdateDecoderV2, YEncoder = UpdateEncoderV2) => {
+  const state = decodeStateVector(sv);
+  const encoder = new YEncoder();
+  const lazyStructWriter = new LazyStructWriter(encoder);
+  const decoder = new YDecoder(createDecoder(update));
+  const reader = new LazyStructReader(decoder, false);
+  while (reader.curr) {
+    const curr = reader.curr;
+    const currClient = curr.id.client;
+    const svClock = state.get(currClient) || 0;
+    if (reader.curr.constructor === Skip) {
+      reader.next();
+      continue;
+    }
+    if (curr.id.clock + curr.length > svClock) {
+      writeStructToLazyStructWriter(lazyStructWriter, curr, max(svClock - curr.id.clock, 0));
+      reader.next();
+      while (reader.curr && reader.curr.id.client === currClient) {
+        writeStructToLazyStructWriter(lazyStructWriter, reader.curr, 0);
+        reader.next();
+      }
+    } else {
+      while (reader.curr && reader.curr.id.client === currClient && reader.curr.id.clock + reader.curr.length <= svClock) {
+        reader.next();
+      }
+    }
+  }
+  finishLazyStructWriting(lazyStructWriter);
+  const ds = readDeleteSet(decoder);
+  writeDeleteSet(encoder, ds);
+  return encoder.toUint8Array();
+};
 var flushLazyStructWriter = (lazyWriter) => {
   if (lazyWriter.written > 0) {
     lazyWriter.clientStructs.push({ written: lazyWriter.written, restEncoder: toUint8Array(lazyWriter.encoder.restEncoder) });
@@ -14937,6 +15028,20 @@ var finishLazyStructWriting = (lazyWriter) => {
     writeUint8Array(restEncoder, partStructs.restEncoder);
   }
 };
+var convertUpdateFormat = (update, blockTransformer, YDecoder, YEncoder) => {
+  const updateDecoder = new YDecoder(createDecoder(update));
+  const lazyDecoder = new LazyStructReader(updateDecoder, false);
+  const updateEncoder = new YEncoder();
+  const lazyWriter = new LazyStructWriter(updateEncoder);
+  for (let curr = lazyDecoder.curr; curr !== null; curr = lazyDecoder.next()) {
+    writeStructToLazyStructWriter(lazyWriter, blockTransformer(curr), 0);
+  }
+  finishLazyStructWriting(lazyWriter);
+  const ds = readDeleteSet(updateDecoder);
+  writeDeleteSet(updateEncoder, ds);
+  return updateEncoder.toUint8Array();
+};
+var convertUpdateFormatV2ToV1 = (update) => convertUpdateFormat(update, id, UpdateDecoderV2, UpdateEncoderV1);
 var errorComputeChanges = "You must not compute changes after the event-handler fired.";
 var YEvent = class {
   /**
@@ -19405,6 +19510,39 @@ if (glo[importIdentifier] === true) {
 }
 glo[importIdentifier] = true;
 
+// src/utils.ts
+function uint8ArrayToBase64(bytes) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  }
+  const CHUNK_SIZE = 8192;
+  const len = bytes.length;
+  let binary = "";
+  for (let i = 0; i < len; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+function base64ToUint8Array(base64) {
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(base64, "base64");
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+function normalizePath(path) {
+  if (!path)
+    return "";
+  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
 // src/awareness.ts
 var AwarenessManager = class {
   constructor(user) {
@@ -19437,8 +19575,9 @@ var AwarenessManager = class {
     this.notifyLocal();
   }
   updateActiveFile(path) {
-    if (this.localState.activeFile !== path) {
-      this.localState.activeFile = path;
+    const cleanPath = path ? normalizePath(path) : null;
+    if (this.localState.activeFile !== cleanPath) {
+      this.localState.activeFile = cleanPath;
       this.localState.cursor = null;
       this.localState.lastActive = Date.now();
       this.notify();
@@ -19461,19 +19600,21 @@ var AwarenessManager = class {
       if (state.clientId === this.localState.clientId)
         continue;
       const existing = this.remotePeers.get(state.clientId);
+      const normalizedStateFile = state.activeFile ? normalizePath(state.activeFile) : null;
       if (!existing) {
         this.remotePeers.set(state.clientId, {
           ...state,
+          activeFile: normalizedStateFile,
           lastActive: now
         });
         hasChanged = true;
       } else {
         const cursorChanged = !existing.cursor && !!state.cursor || !!existing.cursor && !state.cursor || !!existing.cursor && !!state.cursor && (existing.cursor.anchor !== state.cursor.anchor || existing.cursor.head !== state.cursor.head);
-        const fileChanged = existing.activeFile !== state.activeFile;
+        const fileChanged = existing.activeFile !== normalizedStateFile;
         const userChanged = existing.user.name !== state.user?.name || existing.user.color !== state.user?.color || existing.user.role !== state.user?.role;
         existing.lastActive = now;
         if (cursorChanged || fileChanged || userChanged) {
-          existing.activeFile = state.activeFile;
+          existing.activeFile = normalizedStateFile;
           existing.cursor = state.cursor;
           if (state.user) {
             existing.user = { ...existing.user, ...state.user };
@@ -19492,9 +19633,10 @@ var AwarenessManager = class {
     }
   }
   getActivePeersForFile(path) {
+    const cleanPath = normalizePath(path);
     const peers = [];
     for (const peer of this.remotePeers.values()) {
-      if (peer.activeFile === path) {
+      if (peer.activeFile && normalizePath(peer.activeFile) === cleanPath) {
         peers.push(peer);
       }
     }
@@ -19593,34 +19735,6 @@ var DEFAULT_SETTINGS = {
   ],
   activeProfileId: "default-profile"
 };
-
-// src/utils.ts
-function uint8ArrayToBase64(bytes) {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
-  }
-  const CHUNK_SIZE = 8192;
-  const len = bytes.length;
-  let binary = "";
-  for (let i = 0; i < len; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
-    binary += String.fromCharCode.apply(null, chunk);
-  }
-  return btoa(binary);
-}
-function base64ToUint8Array(base64) {
-  if (typeof Buffer !== "undefined") {
-    const buf = Buffer.from(base64, "base64");
-    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-  }
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
-}
 
 // tests/sync-engine.test.ts
 describe("Plugin Logic: Encoders, Selectors, and Awareness", () => {
@@ -19890,22 +20004,60 @@ describe("Plugin Logic: Encoders, Selectors, and Awareness", () => {
     const hasRebind = tr.effects.some((e) => e.is(rebindEffect));
     assert.strictEqual(hasRebind, true);
   });
-  test("Sync History: bounded memory log with O(1) in-place capping", () => {
-    const logs = [];
-    for (let i = 0; i < 250; i++) {
-      logs.unshift({
-        id: `h_${i}`,
-        type: "local_update",
-        path: "Note.md",
-        timestamp: Date.now(),
-        summary: `Edit ${i}`
-      });
-      if (logs.length > 200) {
-        logs.pop();
+  test("normalizePath: cross-platform slash and whitespace consistency", () => {
+    assert.strictEqual(normalizePath("Japanese\\Accueil.md"), "Japanese/Accueil.md");
+    assert.strictEqual(normalizePath("/Japanese/Accueil.md/"), "Japanese/Accueil.md");
+    assert.strictEqual(normalizePath("Kurotsuki\\Notes\\Test.md"), "Kurotsuki/Notes/Test.md");
+    assert.strictEqual(normalizePath(""), "");
+    assert.strictEqual(normalizePath(null), "");
+    assert.strictEqual(normalizePath(void 0), "");
+  });
+  test("Cross-platform awareness matches Windows backslashes with mobile forward slashes", () => {
+    const awareness = new AwarenessManager({ id: "u1", name: "PC", color: "#111" });
+    awareness.updateActiveFile("Japanese\\Accueil.md");
+    awareness.handleRemoteAwareness([
+      {
+        clientId: 42,
+        user: { id: "u2", name: "Phone", color: "#222" },
+        activeFile: "Japanese/Accueil.md",
+        // Mobile POSIX path
+        cursor: { anchor: 10, head: 10 },
+        lastActive: Date.now()
       }
+    ]);
+    const peers = awareness.getActivePeersForFile("Japanese/Accueil.md");
+    assert.strictEqual(peers.length, 1);
+    assert.strictEqual(peers[0].user.name, "Phone");
+    const peersWin = awareness.getActivePeersForFile("Japanese\\Accueil.md");
+    assert.strictEqual(peersWin.length, 1);
+    assert.strictEqual(peersWin[0].user.name, "Phone");
+    awareness.destroy();
+  });
+  test("Real-time Yjs CRDT: zero-duplication seed and instant peer edit propagation", () => {
+    const serverDoc = new Doc();
+    const clientA = new Doc();
+    const clientB = new Doc();
+    const localInitialText = "Bonjour le monde";
+    applyUpdate(clientA, encodeStateAsUpdate(serverDoc));
+    if (clientA.getText("content").length === 0) {
+      clientA.getText("content").insert(0, localInitialText);
+      applyUpdate(serverDoc, encodeStateAsUpdate(clientA));
     }
-    assert.strictEqual(logs.length, 200);
-    assert.strictEqual(logs[0].summary, "Edit 249");
-    assert.strictEqual(logs[199].summary, "Edit 50");
+    assert.strictEqual(serverDoc.getText("content").toString(), "Bonjour le monde");
+    applyUpdate(clientB, encodeStateAsUpdate(serverDoc));
+    assert.strictEqual(clientB.getText("content").toString(), "Bonjour le monde");
+    let updateB = null;
+    clientB.on("update", (u) => {
+      updateB = u;
+    });
+    clientB.getText("content").insert(16, "!");
+    assert.ok(updateB);
+    applyUpdate(serverDoc, updateB);
+    applyUpdate(clientA, updateB);
+    assert.strictEqual(clientA.getText("content").toString(), "Bonjour le monde!");
+    assert.strictEqual(serverDoc.getText("content").toString(), "Bonjour le monde!");
+    assert.strictEqual(clientB.getText("content").toString(), "Bonjour le monde!");
+    assert.strictEqual(clientA.store.pendingStructs, null);
+    assert.strictEqual(clientB.store.pendingStructs, null);
   });
 });

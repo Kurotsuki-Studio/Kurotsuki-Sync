@@ -30,3 +30,7 @@ export function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
+export function normalizePath(path: string | null | undefined): string {
+  if (!path) return '';
+  return path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}

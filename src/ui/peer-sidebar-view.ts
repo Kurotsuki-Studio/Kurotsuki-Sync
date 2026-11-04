@@ -1,6 +1,7 @@
 import { ItemView, WorkspaceLeaf } from 'obsidian';
 import type KurotsukiSyncPlugin from '../main';
 import { PeerAwarenessState } from '../types';
+import { normalizePath } from '../utils';
 
 export const VIEW_TYPE_KUROTSUKI_PEERS = 'kurotsuki-peer-view';
 
@@ -160,21 +161,22 @@ export class KurotsukiPeerSidebarView extends ItemView {
     // Active Note Link
     const noteRow = body.createDiv({ cls: 'kurotsuki-peer-note-row' });
     const currentActivePath = this.app.workspace.getActiveFile()?.path;
+    const cleanCurrentActive = currentActivePath ? normalizePath(currentActivePath) : null;
 
     if (state.activeFile) {
-      const isSameDoc = currentActivePath === state.activeFile;
-      const fileName = state.activeFile.split('/').pop() || state.activeFile;
+      const cleanPeerFile = normalizePath(state.activeFile);
+      const isSameDoc = cleanCurrentActive === cleanPeerFile;
 
       const fileLink = noteRow.createEl('a', {
         cls: `kurotsuki-note-link ${isSameDoc ? 'kurotsuki-note-same' : ''}`,
-        text: `📝 ${fileName}`,
-        attr: { title: `Cliquer pour ouvrir : ${state.activeFile}` },
+        text: `📝 ${cleanPeerFile}`,
+        attr: { title: `Cliquer pour ouvrir : ${cleanPeerFile}` },
       });
 
       fileLink.onclick = async (e) => {
         e.preventDefault();
-        if (state.activeFile) {
-          await this.app.workspace.openLinkText(state.activeFile, '', false);
+        if (cleanPeerFile) {
+          await this.app.workspace.openLinkText(cleanPeerFile, '', false);
         }
       };
 
@@ -195,7 +197,8 @@ export class KurotsukiPeerSidebarView extends ItemView {
       let snippetDisplay = '';
 
       if (state.activeFile) {
-        const doc = this.plugin.syncEngine.getDoc(state.activeFile);
+        const cleanFile = normalizePath(state.activeFile);
+        const doc = this.plugin.syncEngine.getDoc(cleanFile);
         if (doc) {
           const content = doc.getText('content').toString();
           const head = Math.max(0, Math.min(state.cursor.head, content.length));

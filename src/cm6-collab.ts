@@ -11,6 +11,7 @@ import {
 import * as Y from 'yjs';
 import { AwarenessManager } from './awareness';
 import { PeerAwarenessState } from './types';
+import { normalizePath } from './utils';
 
 export const remoteSyncAnnotation = Annotation.define<boolean>();
 export const setReadOnlyEffect = StateEffect.define<boolean>();
@@ -197,10 +198,11 @@ export function createCollabExtension(
       }
 
       private bindActiveYDoc(): void {
-        const path = getActiveFilePath(this.view);
-        if (!path) {
+        const rawPath = getActiveFilePath(this.view);
+        if (!rawPath) {
           return;
         }
+        const path = normalizePath(rawPath);
 
         // If active file is detected, update awareness if this leaf is focused or if awareness is empty
         if (this.view.hasFocus || !awareness.getLocalState().activeFile) {
@@ -224,64 +226,47 @@ export function createCollabExtension(
         const yText = doc.getText('content');
         this.currentYText = yText;
 
-        // If local editor has text and Yjs is empty, seed Yjs text
-        const localText = this.view.state.doc.toString();
-        if (yText.length === 0 && localText.length > 0) {
-          doc.transact(() => {
-            yText.insert(0, localText);
-          }, 'internal');
-        } else if (yText.length > 0 && yText.toString() !== localText) {
-          // If Yjs already has text from server/peers, sync editor to Yjs content with surgical diff & preserved cursor
-          const yString = yText.toString();
-          const changes = computeTextChanges(localText, yString);
+        const syncEditorToYText = () => {
+          if (this.isDispatchingRemote) return;
+          const currentCmText = this.view.state.doc.toString();
+          const targetYText = yText.toString();
+
+          // If Yjs is completely empty and CM has text, wait for server sync or first keystroke
+          if (targetYText.length === 0 && currentCmText.length > 0) {
+            return;
+          }
+
+          if (currentCmText === targetYText) {
+            return; // In exact sync, do not dispatch or duplicate
+          }
+
+          const changes = computeTextChanges(currentCmText, targetYText);
           if (changes.length > 0) {
             this.isDispatchingRemote = true;
-            const curSel = this.view.state.selection;
-            const changeDesc = this.view.state.changes(changes);
-            const mappedSel = curSel.map(changeDesc);
-            this.view.dispatch({
-              changes,
-              selection: mappedSel,
-              annotations: [remoteSyncAnnotation.of(true)],
-            });
-            this.isDispatchingRemote = false;
+            try {
+              const curSel = this.view.state.selection;
+              const changeDesc = this.view.state.changes(changes);
+              const mappedSel = curSel.map(changeDesc);
+              this.view.dispatch({
+                changes,
+                selection: mappedSel,
+                annotations: [remoteSyncAnnotation.of(true)],
+              });
+            } finally {
+              this.isDispatchingRemote = false;
+            }
           }
+        };
+
+        // If Yjs already has text from server, sync CodeMirror to match
+        if (yText.length > 0) {
+          syncEditorToYText();
         }
 
         // Listen for inbound Yjs changes (from remote peers via WebSocket)
         this.yTextObserver = (event: Y.YTextEvent) => {
-          if (event.transaction.origin === 'cm6' || event.transaction.origin === 'internal') return;
-
-          // Convert Yjs deltas into CodeMirror transaction accurately
-          let index = 0;
-          const changes: Array<{ from: number; to: number; insert?: string }> = [];
-
-          for (const d of event.delta) {
-            if (d.retain) {
-              index += d.retain;
-            }
-            if (d.delete) {
-              changes.push({ from: index, to: index + d.delete });
-              index += d.delete;
-            }
-            if (d.insert) {
-              const str = typeof d.insert === 'string' ? d.insert : '';
-              changes.push({ from: index, to: index, insert: str });
-            }
-          }
-
-          if (changes.length > 0) {
-            this.isDispatchingRemote = true;
-            const curSel = this.view.state.selection;
-            const changeDesc = this.view.state.changes(changes);
-            const mappedSel = curSel.map(changeDesc);
-            this.view.dispatch({
-              changes,
-              selection: mappedSel,
-              annotations: [remoteSyncAnnotation.of(true)],
-            });
-            this.isDispatchingRemote = false;
-          }
+          if (event.transaction.origin === 'cm6') return;
+          syncEditorToYText();
         };
 
         yText.observe(this.yTextObserver);
@@ -324,21 +309,29 @@ export function createCollabExtension(
             const yText = this.currentYText;
             const doc = yText.doc;
             if (doc) {
-              doc.transact(() => {
-                let adj = 0;
-                update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                  const insertStr = inserted.toString();
-                  const deleteLen = toA - fromA;
-                  const pos = fromA + adj;
-                  if (deleteLen > 0) {
-                    yText.delete(pos, deleteLen);
-                  }
-                  if (insertStr.length > 0) {
-                    yText.insert(pos, insertStr);
-                  }
-                  adj += insertStr.length - deleteLen;
-                });
-              }, 'cm6');
+              const currentCmText = update.state.doc.toString();
+              if (yText.length === 0 && currentCmText.length > 0) {
+                // Initial seed from first typing client
+                doc.transact(() => {
+                  yText.insert(0, currentCmText);
+                }, 'cm6');
+              } else {
+                doc.transact(() => {
+                  let adj = 0;
+                  update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+                    const insertStr = inserted.toString();
+                    const deleteLen = toA - fromA;
+                    const pos = fromA + adj;
+                    if (deleteLen > 0) {
+                      yText.delete(pos, deleteLen);
+                    }
+                    if (insertStr.length > 0) {
+                      yText.insert(pos, insertStr);
+                    }
+                    adj += insertStr.length - deleteLen;
+                  });
+                }, 'cm6');
+              }
             }
           }
         }

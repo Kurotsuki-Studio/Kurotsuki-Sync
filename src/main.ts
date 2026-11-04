@@ -10,6 +10,7 @@ import { KurotsukiPeerSidebarView, VIEW_TYPE_KUROTSUKI_PEERS } from './ui/peer-s
 import { ShareModal } from './ui/share-modal';
 import { StatusModal } from './ui/status-modal';
 import { VaultSwitcherModal } from './ui/vault-switcher-modal';
+import { normalizePath } from './utils';
 import { KurotsukiWSClient } from './ws-client';
 
 interface CMEditorHost {
@@ -115,13 +116,17 @@ export default class KurotsukiSyncPlugin extends Plugin {
     let previousActivePath: string | null = null;
 
     const handleActiveFileChange = async (fileOrLeafPath: string | null) => {
-      if (previousActivePath && previousActivePath !== fileOrLeafPath) {
+      const cleanPath = fileOrLeafPath ? normalizePath(fileOrLeafPath) : null;
+      if (previousActivePath && previousActivePath !== cleanPath) {
         await this.syncEngine.flushDocToDisk(previousActivePath);
       }
-      previousActivePath = fileOrLeafPath;
-      if (this.awareness.getLocalState().activeFile !== fileOrLeafPath) {
-        this.awareness.updateActiveFile(fileOrLeafPath);
+      previousActivePath = cleanPath;
+      if (this.awareness.getLocalState().activeFile !== cleanPath) {
+        this.awareness.updateActiveFile(cleanPath);
         this.broadcastLocalAwareness();
+      }
+      if (cleanPath) {
+        this.syncEngine.requestDocFromServer(cleanPath);
       }
       // Notify CM6 editor plugins in open leaves to rebind to current active document
       this.app.workspace.iterateAllLeaves((leaf) => {
@@ -398,9 +403,11 @@ export default class KurotsukiSyncPlugin extends Plugin {
     this.wsClient.onStatusChange((status) => {
       updateBar();
       if (status === 'connected') {
-        const active = this.getRobustActiveFilePath();
+        const rawActive = this.getRobustActiveFilePath();
+        const active = rawActive ? normalizePath(rawActive) : null;
         if (active) {
           this.awareness.updateActiveFile(active);
+          this.syncEngine.requestDocFromServer(active);
         }
         this.broadcastLocalAwareness();
         void this.syncEngine.reconcileVault();
@@ -435,7 +442,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
       if (activeMarkdown?.file) {
         const host = activeMarkdown.editor as unknown as CMEditorHost;
         if (host?.cm === view || host?.cm?.dom === view.dom) {
-          return activeMarkdown.file.path;
+          return normalizePath(activeMarkdown.file.path);
         }
       }
 
@@ -445,7 +452,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
         if (!foundPath && leaf.view instanceof MarkdownView && leaf.view.file) {
           const host = leaf.view.editor as unknown as CMEditorHost;
           if (host?.cm === view || host?.cm?.dom === view.dom) {
-            foundPath = leaf.view.file.path;
+            foundPath = normalizePath(leaf.view.file.path);
           }
         }
       });
@@ -457,7 +464,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
           activeMarkdown?.file &&
           (activeMarkdown.contentEl?.contains(view.dom) || activeMarkdown.containerEl?.contains(view.dom))
         ) {
-          return activeMarkdown.file.path;
+          return normalizePath(activeMarkdown.file.path);
         }
 
         this.app.workspace.iterateAllLeaves((leaf) => {
@@ -466,7 +473,7 @@ export default class KurotsukiSyncPlugin extends Plugin {
               (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom)) ||
               (leaf.view.containerEl && leaf.view.containerEl.contains(view.dom))
             ) {
-              foundPath = leaf.view.file.path;
+              foundPath = normalizePath(leaf.view.file.path);
             }
           }
         });
@@ -474,23 +481,24 @@ export default class KurotsukiSyncPlugin extends Plugin {
       }
 
       if (activeMarkdown?.file) {
-        return activeMarkdown.file.path;
+        return normalizePath(activeMarkdown.file.path);
       }
     }
-    return this.getRobustActiveFilePath();
+    const robust = this.getRobustActiveFilePath();
+    return robust ? normalizePath(robust) : null;
   }
 
   public getRobustActiveFilePath(): string | null {
     const activeFile = this.app.workspace.getActiveFile();
-    if (activeFile) return activeFile.path;
+    if (activeFile) return normalizePath(activeFile.path);
 
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (activeView && activeView.file) return activeView.file.path;
+    if (activeView && activeView.file) return normalizePath(activeView.file.path);
 
     let path: string | null = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (!path && leaf.view instanceof MarkdownView && leaf.view.file) {
-        path = leaf.view.file.path;
+        path = normalizePath(leaf.view.file.path);
       }
     });
     return path;

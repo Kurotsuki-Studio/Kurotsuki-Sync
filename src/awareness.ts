@@ -1,4 +1,5 @@
 import { PeerAwarenessState, RemoteCursor, UserProfile } from './types';
+import { normalizePath } from './utils';
 
 export type AwarenessListener = (peers: PeerAwarenessState[]) => void;
 export type LocalChangeListener = (state: PeerAwarenessState) => void;
@@ -42,8 +43,9 @@ export class AwarenessManager {
   }
 
   public updateActiveFile(path: string | null): void {
-    if (this.localState.activeFile !== path) {
-      this.localState.activeFile = path;
+    const cleanPath = path ? normalizePath(path) : null;
+    if (this.localState.activeFile !== cleanPath) {
+      this.localState.activeFile = cleanPath;
       this.localState.cursor = null;
       this.localState.lastActive = Date.now();
       this.notify();
@@ -74,9 +76,11 @@ export class AwarenessManager {
       if (state.clientId === this.localState.clientId) continue;
 
       const existing = this.remotePeers.get(state.clientId);
+      const normalizedStateFile = state.activeFile ? normalizePath(state.activeFile) : null;
       if (!existing) {
         this.remotePeers.set(state.clientId, {
           ...state,
+          activeFile: normalizedStateFile,
           lastActive: now,
         });
         hasChanged = true;
@@ -87,7 +91,7 @@ export class AwarenessManager {
           (!!existing.cursor &&
             !!state.cursor &&
             (existing.cursor.anchor !== state.cursor.anchor || existing.cursor.head !== state.cursor.head));
-        const fileChanged = existing.activeFile !== state.activeFile;
+        const fileChanged = existing.activeFile !== normalizedStateFile;
         const userChanged =
           existing.user.name !== state.user?.name ||
           existing.user.color !== state.user?.color ||
@@ -95,7 +99,7 @@ export class AwarenessManager {
 
         existing.lastActive = now;
         if (cursorChanged || fileChanged || userChanged) {
-          existing.activeFile = state.activeFile;
+          existing.activeFile = normalizedStateFile;
           existing.cursor = state.cursor;
           if (state.user) {
             existing.user = { ...existing.user, ...state.user };
@@ -117,9 +121,10 @@ export class AwarenessManager {
   }
 
   public getActivePeersForFile(path: string): PeerAwarenessState[] {
+    const cleanPath = normalizePath(path);
     const peers: PeerAwarenessState[] = [];
     for (const peer of this.remotePeers.values()) {
-      if (peer.activeFile === path) {
+      if (peer.activeFile && normalizePath(peer.activeFile) === cleanPath) {
         peers.push(peer);
       }
     }

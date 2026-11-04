@@ -34,6 +34,39 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian8 = require("obsidian");
 
+// src/utils.ts
+function uint8ArrayToBase64(bytes) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  }
+  const CHUNK_SIZE = 8192;
+  const len = bytes.length;
+  let binary = "";
+  for (let i = 0; i < len; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+function base64ToUint8Array(base64) {
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(base64, "base64");
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+function normalizePath(path) {
+  if (!path)
+    return "";
+  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
 // src/awareness.ts
 var AwarenessManager = class {
   constructor(user) {
@@ -66,8 +99,9 @@ var AwarenessManager = class {
     this.notifyLocal();
   }
   updateActiveFile(path) {
-    if (this.localState.activeFile !== path) {
-      this.localState.activeFile = path;
+    const cleanPath = path ? normalizePath(path) : null;
+    if (this.localState.activeFile !== cleanPath) {
+      this.localState.activeFile = cleanPath;
       this.localState.cursor = null;
       this.localState.lastActive = Date.now();
       this.notify();
@@ -90,19 +124,21 @@ var AwarenessManager = class {
       if (state.clientId === this.localState.clientId)
         continue;
       const existing = this.remotePeers.get(state.clientId);
+      const normalizedStateFile = state.activeFile ? normalizePath(state.activeFile) : null;
       if (!existing) {
         this.remotePeers.set(state.clientId, {
           ...state,
+          activeFile: normalizedStateFile,
           lastActive: now
         });
         hasChanged = true;
       } else {
         const cursorChanged = !existing.cursor && !!state.cursor || !!existing.cursor && !state.cursor || !!existing.cursor && !!state.cursor && (existing.cursor.anchor !== state.cursor.anchor || existing.cursor.head !== state.cursor.head);
-        const fileChanged = existing.activeFile !== state.activeFile;
+        const fileChanged = existing.activeFile !== normalizedStateFile;
         const userChanged = existing.user.name !== state.user?.name || existing.user.color !== state.user?.color || existing.user.role !== state.user?.role;
         existing.lastActive = now;
         if (cursorChanged || fileChanged || userChanged) {
-          existing.activeFile = state.activeFile;
+          existing.activeFile = normalizedStateFile;
           existing.cursor = state.cursor;
           if (state.user) {
             existing.user = { ...existing.user, ...state.user };
@@ -121,9 +157,10 @@ var AwarenessManager = class {
     }
   }
   getActivePeersForFile(path) {
+    const cleanPath = normalizePath(path);
     const peers = [];
     for (const peer of this.remotePeers.values()) {
-      if (peer.activeFile === path) {
+      if (peer.activeFile && normalizePath(peer.activeFile) === cleanPath) {
         peers.push(peer);
       }
     }
@@ -340,10 +377,11 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         }
       }
       bindActiveYDoc() {
-        const path = getActiveFilePath(this.view);
-        if (!path) {
+        const rawPath = getActiveFilePath(this.view);
+        if (!rawPath) {
           return;
         }
+        const path = normalizePath(rawPath);
         if (this.view.hasFocus || !awareness.getLocalState().activeFile) {
           if (awareness.getLocalState().activeFile !== path) {
             awareness.updateActiveFile(path);
@@ -360,57 +398,41 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
           return;
         const yText = doc2.getText("content");
         this.currentYText = yText;
-        const localText = this.view.state.doc.toString();
-        if (yText.length === 0 && localText.length > 0) {
-          doc2.transact(() => {
-            yText.insert(0, localText);
-          }, "internal");
-        } else if (yText.length > 0 && yText.toString() !== localText) {
-          const yString = yText.toString();
-          const changes = computeTextChanges(localText, yString);
+        const syncEditorToYText = () => {
+          if (this.isDispatchingRemote)
+            return;
+          const currentCmText = this.view.state.doc.toString();
+          const targetYText = yText.toString();
+          if (targetYText.length === 0 && currentCmText.length > 0) {
+            return;
+          }
+          if (currentCmText === targetYText) {
+            return;
+          }
+          const changes = computeTextChanges(currentCmText, targetYText);
           if (changes.length > 0) {
             this.isDispatchingRemote = true;
-            const curSel = this.view.state.selection;
-            const changeDesc = this.view.state.changes(changes);
-            const mappedSel = curSel.map(changeDesc);
-            this.view.dispatch({
-              changes,
-              selection: mappedSel,
-              annotations: [remoteSyncAnnotation.of(true)]
-            });
-            this.isDispatchingRemote = false;
+            try {
+              const curSel = this.view.state.selection;
+              const changeDesc = this.view.state.changes(changes);
+              const mappedSel = curSel.map(changeDesc);
+              this.view.dispatch({
+                changes,
+                selection: mappedSel,
+                annotations: [remoteSyncAnnotation.of(true)]
+              });
+            } finally {
+              this.isDispatchingRemote = false;
+            }
           }
+        };
+        if (yText.length > 0) {
+          syncEditorToYText();
         }
         this.yTextObserver = (event) => {
-          if (event.transaction.origin === "cm6" || event.transaction.origin === "internal")
+          if (event.transaction.origin === "cm6")
             return;
-          let index = 0;
-          const changes = [];
-          for (const d of event.delta) {
-            if (d.retain) {
-              index += d.retain;
-            }
-            if (d.delete) {
-              changes.push({ from: index, to: index + d.delete });
-              index += d.delete;
-            }
-            if (d.insert) {
-              const str = typeof d.insert === "string" ? d.insert : "";
-              changes.push({ from: index, to: index, insert: str });
-            }
-          }
-          if (changes.length > 0) {
-            this.isDispatchingRemote = true;
-            const curSel = this.view.state.selection;
-            const changeDesc = this.view.state.changes(changes);
-            const mappedSel = curSel.map(changeDesc);
-            this.view.dispatch({
-              changes,
-              selection: mappedSel,
-              annotations: [remoteSyncAnnotation.of(true)]
-            });
-            this.isDispatchingRemote = false;
-          }
+          syncEditorToYText();
         };
         yText.observe(this.yTextObserver);
       }
@@ -442,21 +464,28 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             const yText = this.currentYText;
             const doc2 = yText.doc;
             if (doc2) {
-              doc2.transact(() => {
-                let adj = 0;
-                update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-                  const insertStr = inserted.toString();
-                  const deleteLen = toA - fromA;
-                  const pos = fromA + adj;
-                  if (deleteLen > 0) {
-                    yText.delete(pos, deleteLen);
-                  }
-                  if (insertStr.length > 0) {
-                    yText.insert(pos, insertStr);
-                  }
-                  adj += insertStr.length - deleteLen;
-                });
-              }, "cm6");
+              const currentCmText = update.state.doc.toString();
+              if (yText.length === 0 && currentCmText.length > 0) {
+                doc2.transact(() => {
+                  yText.insert(0, currentCmText);
+                }, "cm6");
+              } else {
+                doc2.transact(() => {
+                  let adj = 0;
+                  update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+                    const insertStr = inserted.toString();
+                    const deleteLen = toA - fromA;
+                    const pos = fromA + adj;
+                    if (deleteLen > 0) {
+                      yText.delete(pos, deleteLen);
+                    }
+                    if (insertStr.length > 0) {
+                      yText.insert(pos, insertStr);
+                    }
+                    adj += insertStr.length - deleteLen;
+                  });
+                }, "cm6");
+              }
             }
           }
         }
@@ -9289,34 +9318,6 @@ if (glo[importIdentifier] === true) {
 }
 glo[importIdentifier] = true;
 
-// src/utils.ts
-function uint8ArrayToBase64(bytes) {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
-  }
-  const CHUNK_SIZE = 8192;
-  const len = bytes.length;
-  let binary = "";
-  for (let i = 0; i < len; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
-    binary += String.fromCharCode.apply(null, chunk);
-  }
-  return btoa(binary);
-}
-function base64ToUint8Array(base64) {
-  if (typeof Buffer !== "undefined") {
-    const buf = Buffer.from(base64, "base64");
-    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-  }
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
-}
-
 // src/sync-engine.ts
 var SyncEngine = class {
   constructor(app, settings, wsClient) {
@@ -9341,26 +9342,27 @@ var SyncEngine = class {
   shouldSync(path) {
     if (!path)
       return false;
-    const normalized = path.replace(/\\/g, "/");
+    const normalized = normalizePath(path);
     if (normalized.startsWith(".") || normalized.includes("/.") || normalized.includes(".obsidian")) {
       return false;
     }
     const configDir = this.app.vault.configDir;
-    if (configDir && (normalized === configDir || normalized.startsWith(configDir + "/"))) {
+    const cleanConfig = configDir ? normalizePath(configDir) : null;
+    if (cleanConfig && (normalized === cleanConfig || normalized.startsWith(cleanConfig + "/"))) {
       return false;
     }
     if (this.settings.syncMode === "entire_vault") {
       return true;
     }
     return this.settings.sharedFolders.some((folder) => {
-      const cleanFolder = folder.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      const cleanFolder = normalizePath(folder);
       if (!cleanFolder)
         return false;
       return normalized === cleanFolder || normalized.startsWith(cleanFolder + "/");
     });
   }
-  getDoc(path) {
-    return this.docs.get(path);
+  getDoc(rawPath) {
+    return this.docs.get(normalizePath(rawPath));
   }
   queueOutgoingYjsUpdate(path, update) {
     let list = this.pendingOutgoingUpdates.get(path);
@@ -9412,7 +9414,8 @@ var SyncEngine = class {
       this.flushOutgoingYjsUpdate(p);
     }
   }
-  getOrCreateDoc(path, initialContent) {
+  getOrCreateDoc(rawPath, initialContent) {
+    const path = normalizePath(rawPath);
     let doc2 = this.docs.get(path);
     if (!doc2) {
       doc2 = new Doc();
@@ -9433,17 +9436,30 @@ var SyncEngine = class {
     }
     return doc2;
   }
-  removeDoc(path) {
+  requestDocFromServer(rawPath) {
+    const path = normalizePath(rawPath);
+    if (!this.shouldSync(path))
+      return;
+    if (this.wsClient.getStatus() === "connected") {
+      this.wsClient.send({
+        type: "doc_request",
+        path
+      });
+    }
+  }
+  removeDoc(rawPath) {
+    const path = normalizePath(rawPath);
     const doc2 = this.docs.get(path);
     if (doc2) {
       doc2.destroy();
       this.docs.delete(path);
     }
   }
-  isOpenInEditor(path) {
+  isOpenInEditor(rawPath) {
+    const path = normalizePath(rawPath);
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file && leaf.view.file.path === path) {
+      if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file && normalizePath(leaf.view.file.path) === path) {
         open = true;
       }
     });
@@ -9730,15 +9746,38 @@ var SyncEngine = class {
       }
     }
   }
-  async handleDocResponse(path, updateB64) {
+  async handleDocResponse(rawPath, updateB64) {
+    const path = normalizePath(rawPath);
     if (!this.shouldSync(path))
       return;
     const update = base64ToUint8Array(updateB64);
     const doc2 = this.getOrCreateDoc(path);
     applyUpdate(doc2, update, "remote");
     this.trackSyncedFile(path);
+    const yText = doc2.getText("content");
+    if (yText.length === 0) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof import_obsidian3.TFile) {
+        try {
+          const content = await this.app.vault.read(file);
+          if (content.length > 0 && yText.length === 0) {
+            doc2.transact(() => {
+              yText.insert(0, content);
+            }, "seed");
+            const seedUpdate = encodeStateAsUpdate(doc2);
+            this.wsClient.send({
+              type: "yjs_sync",
+              path,
+              update: uint8ArrayToBase64(seedUpdate)
+            });
+          }
+        } catch (e) {
+          console.error(`[Kurotsuki] Error seeding doc from local file ${path}:`, e);
+        }
+      }
+    }
     if (!this.isOpenInEditor(path)) {
-      const content = doc2.getText("content").toString();
+      const content = yText.toString();
       const abstractFile = this.app.vault.getAbstractFileByPath(path);
       if (abstractFile instanceof import_obsidian3.TFile) {
         const diskContent = await this.app.vault.read(abstractFile);
@@ -9775,7 +9814,8 @@ var SyncEngine = class {
       console.error(`[Kurotsuki] Error downloading attachment ${relativePath}:`, e);
     }
   }
-  async handleRemoteYjsSync(path, updateB64) {
+  async handleRemoteYjsSync(rawPath, updateB64) {
+    const path = normalizePath(rawPath);
     if (!this.shouldSync(path))
       return;
     const update = base64ToUint8Array(updateB64);
@@ -10234,18 +10274,19 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
     }
     const noteRow = body.createDiv({ cls: "kurotsuki-peer-note-row" });
     const currentActivePath = this.app.workspace.getActiveFile()?.path;
+    const cleanCurrentActive = currentActivePath ? normalizePath(currentActivePath) : null;
     if (state.activeFile) {
-      const isSameDoc = currentActivePath === state.activeFile;
-      const fileName = state.activeFile.split("/").pop() || state.activeFile;
+      const cleanPeerFile = normalizePath(state.activeFile);
+      const isSameDoc = cleanCurrentActive === cleanPeerFile;
       const fileLink = noteRow.createEl("a", {
         cls: `kurotsuki-note-link ${isSameDoc ? "kurotsuki-note-same" : ""}`,
-        text: `\u{1F4DD} ${fileName}`,
-        attr: { title: `Cliquer pour ouvrir : ${state.activeFile}` }
+        text: `\u{1F4DD} ${cleanPeerFile}`,
+        attr: { title: `Cliquer pour ouvrir : ${cleanPeerFile}` }
       });
       fileLink.onclick = async (e) => {
         e.preventDefault();
-        if (state.activeFile) {
-          await this.app.workspace.openLinkText(state.activeFile, "", false);
+        if (cleanPeerFile) {
+          await this.app.workspace.openLinkText(cleanPeerFile, "", false);
         }
       };
       if (isSameDoc) {
@@ -10261,7 +10302,8 @@ var KurotsukiPeerSidebarView = class extends import_obsidian5.ItemView {
       let snippetFull = "";
       let snippetDisplay = "";
       if (state.activeFile) {
-        const doc2 = this.plugin.syncEngine.getDoc(state.activeFile);
+        const cleanFile = normalizePath(state.activeFile);
+        const doc2 = this.plugin.syncEngine.getDoc(cleanFile);
         if (doc2) {
           const content = doc2.getText("content").toString();
           const head = Math.max(0, Math.min(state.cursor.head, content.length));
@@ -10845,13 +10887,17 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
     );
     let previousActivePath = null;
     const handleActiveFileChange = async (fileOrLeafPath) => {
-      if (previousActivePath && previousActivePath !== fileOrLeafPath) {
+      const cleanPath = fileOrLeafPath ? normalizePath(fileOrLeafPath) : null;
+      if (previousActivePath && previousActivePath !== cleanPath) {
         await this.syncEngine.flushDocToDisk(previousActivePath);
       }
-      previousActivePath = fileOrLeafPath;
-      if (this.awareness.getLocalState().activeFile !== fileOrLeafPath) {
-        this.awareness.updateActiveFile(fileOrLeafPath);
+      previousActivePath = cleanPath;
+      if (this.awareness.getLocalState().activeFile !== cleanPath) {
+        this.awareness.updateActiveFile(cleanPath);
         this.broadcastLocalAwareness();
+      }
+      if (cleanPath) {
+        this.syncEngine.requestDocFromServer(cleanPath);
       }
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.editor) {
@@ -11090,9 +11136,11 @@ ${p.split("/").pop()}`);
     this.wsClient.onStatusChange((status) => {
       updateBar();
       if (status === "connected") {
-        const active = this.getRobustActiveFilePath();
+        const rawActive = this.getRobustActiveFilePath();
+        const active = rawActive ? normalizePath(rawActive) : null;
         if (active) {
           this.awareness.updateActiveFile(active);
+          this.syncEngine.requestDocFromServer(active);
         }
         this.broadcastLocalAwareness();
         void this.syncEngine.reconcileVault();
@@ -11123,7 +11171,7 @@ ${p.split("/").pop()}`);
       if (activeMarkdown?.file) {
         const host = activeMarkdown.editor;
         if (host?.cm === view || host?.cm?.dom === view.dom) {
-          return activeMarkdown.file.path;
+          return normalizePath(activeMarkdown.file.path);
         }
       }
       let foundPath = null;
@@ -11131,7 +11179,7 @@ ${p.split("/").pop()}`);
         if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
           const host = leaf.view.editor;
           if (host?.cm === view || host?.cm?.dom === view.dom) {
-            foundPath = leaf.view.file.path;
+            foundPath = normalizePath(leaf.view.file.path);
           }
         }
       });
@@ -11139,12 +11187,12 @@ ${p.split("/").pop()}`);
         return foundPath;
       if (view.dom) {
         if (activeMarkdown?.file && (activeMarkdown.contentEl?.contains(view.dom) || activeMarkdown.containerEl?.contains(view.dom))) {
-          return activeMarkdown.file.path;
+          return normalizePath(activeMarkdown.file.path);
         }
         this.app.workspace.iterateAllLeaves((leaf) => {
           if (!foundPath && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
             if (leaf.view.contentEl && leaf.view.contentEl.contains(view.dom) || leaf.view.containerEl && leaf.view.containerEl.contains(view.dom)) {
-              foundPath = leaf.view.file.path;
+              foundPath = normalizePath(leaf.view.file.path);
             }
           }
         });
@@ -11152,22 +11200,23 @@ ${p.split("/").pop()}`);
           return foundPath;
       }
       if (activeMarkdown?.file) {
-        return activeMarkdown.file.path;
+        return normalizePath(activeMarkdown.file.path);
       }
     }
-    return this.getRobustActiveFilePath();
+    const robust = this.getRobustActiveFilePath();
+    return robust ? normalizePath(robust) : null;
   }
   getRobustActiveFilePath() {
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile)
-      return activeFile.path;
+      return normalizePath(activeFile.path);
     const activeView = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
     if (activeView && activeView.file)
-      return activeView.file.path;
+      return normalizePath(activeView.file.path);
     let path = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (!path && leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
-        path = leaf.view.file.path;
+        path = normalizePath(leaf.view.file.path);
       }
     });
     return path;
