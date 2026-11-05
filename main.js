@@ -9846,7 +9846,7 @@ var SyncEngine = class {
       if (res.status === 200) {
         const arrayBuffer = res.arrayBuffer;
         this.lockPath(relativePath, 2e3);
-        await this.ensureFolderExists(relativePath);
+        await this.ensureParentFolderExists(relativePath);
         const existing = this.getFileByNormalizedPath(relativePath);
         if (existing instanceof import_obsidian3.TFile) {
           await this.app.vault.modifyBinary(existing, arrayBuffer);
@@ -9938,11 +9938,7 @@ var SyncEngine = class {
           await this.app.vault.modify(abstractFile, content);
         }
       } else if (!abstractFile) {
-        const lastSlash = path.lastIndexOf("/");
-        if (lastSlash > 0) {
-          const folderPath = path.substring(0, lastSlash);
-          await this.ensureFolderExists(folderPath);
-        }
+        await this.ensureParentFolderExists(path);
         await this.app.vault.create(path, content);
       }
     } catch (err) {
@@ -9977,8 +9973,16 @@ var SyncEngine = class {
           return;
         this.lockPath(cleanPath, 3e3);
         this.lockPath(cleanOldPath, 3e3);
+        const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
+        if (conflictingFolder && conflictingFolder instanceof import_obsidian3.TFolder) {
+          try {
+            await this.app.vault.trash(conflictingFolder, true);
+          } catch (e) {
+            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, e);
+          }
+        }
         const oldFile = this.getFileByNormalizedPath(cleanOldPath);
-        if (oldFile) {
+        if (oldFile && oldFile instanceof import_obsidian3.TFile) {
           const doc2 = this.docs.get(cleanOldPath);
           if (doc2) {
             this.docs.delete(cleanOldPath);
@@ -9988,9 +9992,17 @@ var SyncEngine = class {
           this.serverKnownFiles.add(cleanPath);
           this.untrackSyncedFile(cleanOldPath);
           this.trackSyncedFile(cleanPath);
-          await this.ensureFolderExists(cleanPath);
+          await this.ensureParentFolderExists(cleanPath);
           await this.app.fileManager.renameFile(oldFile, cleanPath);
           this.onFileRenamed?.(cleanPath, cleanOldPath);
+        } else {
+          this.serverKnownFiles.delete(cleanOldPath);
+          this.serverKnownFiles.add(cleanPath);
+          this.trackSyncedFile(cleanPath);
+          this.wsClient.send({
+            type: "doc_request",
+            path: cleanPath
+          });
         }
       } else if (action === "create" || action === "modify") {
         this.trackSyncedFile(cleanPath);
@@ -10039,10 +10051,17 @@ var SyncEngine = class {
       console.error(`[Kurotsuki] Failed to sync attachment ${file.path}:`, err);
     }
   }
-  async ensureFolderExists(folderPath) {
-    const parts = folderPath.split("/");
+  async ensureParentFolderExists(filePath) {
+    const clean = normalizePath(filePath);
+    const lastSlash = clean.lastIndexOf("/");
+    if (lastSlash <= 0)
+      return;
+    const parentDir = clean.substring(0, lastSlash);
+    const parts = parentDir.split("/");
     let current = "";
     for (const part of parts) {
+      if (!part)
+        continue;
       current = current ? `${current}/${part}` : part;
       const existing = this.getFileByNormalizedPath(current);
       if (!existing) {

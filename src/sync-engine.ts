@@ -1,4 +1,4 @@
-import { App, MarkdownView, Notice, TAbstractFile, TFile, requestUrl } from 'obsidian';
+import { App, MarkdownView, Notice, TAbstractFile, TFile, TFolder, requestUrl } from 'obsidian';
 import * as Y from 'yjs';
 import { KurotsukiSettings, SyncHistoryEntry, WSMessage } from './types';
 import { base64ToUint8Array, normalizePath, uint8ArrayToBase64 } from './utils';
@@ -624,7 +624,7 @@ export class SyncEngine {
       if (res.status === 200) {
         const arrayBuffer = res.arrayBuffer;
         this.lockPath(relativePath, 2000);
-        await this.ensureFolderExists(relativePath);
+        await this.ensureParentFolderExists(relativePath);
         const existing = this.getFileByNormalizedPath(relativePath);
         if (existing instanceof TFile) {
           await this.app.vault.modifyBinary(existing, arrayBuffer);
@@ -733,12 +733,7 @@ export class SyncEngine {
           await this.app.vault.modify(abstractFile, content);
         }
       } else if (!abstractFile) {
-        // Ensure folder path exists
-        const lastSlash = path.lastIndexOf('/');
-        if (lastSlash > 0) {
-          const folderPath = path.substring(0, lastSlash);
-          await this.ensureFolderExists(folderPath);
-        }
+        await this.ensureParentFolderExists(path);
         await this.app.vault.create(path, content);
       }
     } catch (err) {
@@ -777,8 +772,18 @@ export class SyncEngine {
         this.lockPath(cleanPath, 3000);
         this.lockPath(cleanOldPath, 3000);
 
+        // If an accidental folder was created with the new file's name, remove it
+        const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
+        if (conflictingFolder && conflictingFolder instanceof TFolder) {
+          try {
+            await this.app.vault.trash(conflictingFolder, true);
+          } catch (e) {
+            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, e);
+          }
+        }
+
         const oldFile = this.getFileByNormalizedPath(cleanOldPath);
-        if (oldFile) {
+        if (oldFile && oldFile instanceof TFile) {
           const doc = this.docs.get(cleanOldPath);
           if (doc) {
             this.docs.delete(cleanOldPath);
@@ -788,9 +793,18 @@ export class SyncEngine {
           this.serverKnownFiles.add(cleanPath);
           this.untrackSyncedFile(cleanOldPath);
           this.trackSyncedFile(cleanPath);
-          await this.ensureFolderExists(cleanPath);
+          await this.ensureParentFolderExists(cleanPath);
           await this.app.fileManager.renameFile(oldFile, cleanPath);
           this.onFileRenamed?.(cleanPath, cleanOldPath);
+        } else {
+          // If oldFile was not yet on disk, track cleanPath and fetch directly
+          this.serverKnownFiles.delete(cleanOldPath);
+          this.serverKnownFiles.add(cleanPath);
+          this.trackSyncedFile(cleanPath);
+          this.wsClient.send({
+            type: 'doc_request',
+            path: cleanPath,
+          });
         }
       } else if (action === 'create' || action === 'modify') {
         this.trackSyncedFile(cleanPath);
@@ -845,10 +859,16 @@ export class SyncEngine {
     }
   }
 
-  private async ensureFolderExists(folderPath: string): Promise<void> {
-    const parts = folderPath.split('/');
+  private async ensureParentFolderExists(filePath: string): Promise<void> {
+    const clean = normalizePath(filePath);
+    const lastSlash = clean.lastIndexOf('/');
+    if (lastSlash <= 0) return;
+
+    const parentDir = clean.substring(0, lastSlash);
+    const parts = parentDir.split('/');
     let current = '';
     for (const part of parts) {
+      if (!part) continue;
       current = current ? `${current}/${part}` : part;
       const existing = this.getFileByNormalizedPath(current);
       if (!existing) {
