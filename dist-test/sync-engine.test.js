@@ -23647,4 +23647,43 @@ describe("Plugin Logic: Encoders, Selectors, and Awareness", () => {
     state = tr.state;
     assert.strictEqual(state.doc.toString(), "Hello World");
   });
+  test("Folder vs File: Extension extraction and CRDT doc classification", () => {
+    function getExtension(filePath) {
+      const clean = normalizePath(filePath);
+      const lastSlash = clean.lastIndexOf("/");
+      const fileName = lastSlash >= 0 ? clean.substring(lastSlash + 1) : clean;
+      const dotIndex = fileName.lastIndexOf(".");
+      if (dotIndex <= 0)
+        return "";
+      return fileName.substring(dotIndex + 1).toLowerCase();
+    }
+    function isCrdtDoc(filePath) {
+      const ext = getExtension(filePath);
+      return ext === "md" || ext === "txt" || ext === "canvas";
+    }
+    function isAttachmentPath(filePath) {
+      const ext = getExtension(filePath);
+      if (!ext)
+        return false;
+      return ext !== "md" && ext !== "txt" && ext !== "canvas";
+    }
+    assert.strictEqual(getExtension("Vocabulaire"), "");
+    assert.strictEqual(getExtension("Japanese/Cours"), "");
+    assert.strictEqual(isCrdtDoc("Vocabulaire"), false);
+    assert.strictEqual(isCrdtDoc("Japanese/Cours"), false);
+    assert.strictEqual(isAttachmentPath("Vocabulaire"), false);
+    assert.strictEqual(isAttachmentPath("Japanese/Cours"), false);
+    assert.strictEqual(getExtension("Note.md"), "md");
+    assert.strictEqual(getExtension("Folder/Doc.txt"), "txt");
+    assert.strictEqual(getExtension("Visual.canvas"), "canvas");
+    assert.strictEqual(isCrdtDoc("Note.md"), true);
+    assert.strictEqual(isCrdtDoc("Folder/Doc.txt"), true);
+    assert.strictEqual(isCrdtDoc("Visual.canvas"), true);
+    assert.strictEqual(isAttachmentPath("Note.md"), false);
+    assert.strictEqual(getExtension("image.png"), "png");
+    assert.strictEqual(getExtension("archive.zip"), "zip");
+    assert.strictEqual(isCrdtDoc("image.png"), false);
+    assert.strictEqual(isAttachmentPath("image.png"), true);
+    assert.strictEqual(isAttachmentPath("archive.zip"), true);
+  });
 });

@@ -22,8 +22,26 @@ export class SyncEngine {
   private renamedOrDeletedPaths: Map<string, string | null> = new Map();
   public onFileRenamed?: (newPath: string, oldPath: string) => void;
 
+  private getExtension(filePath: string): string {
+    const clean = normalizePath(filePath);
+    const lastSlash = clean.lastIndexOf('/');
+    const fileName = lastSlash >= 0 ? clean.substring(lastSlash + 1) : clean;
+    const dotIndex = fileName.lastIndexOf('.');
+    if (dotIndex <= 0) return '';
+    return fileName.substring(dotIndex + 1).toLowerCase();
+  }
+
+  public isCrdtDoc(filePath: string): boolean {
+    const ext = this.getExtension(filePath);
+    return ext === 'md' || ext === 'txt' || ext === 'canvas';
+  }
+
   private isUntitledFile(filePath: string): boolean {
     const clean = normalizePath(filePath);
+    const existing = this.getFileByNormalizedPath(clean);
+    if (existing instanceof TFolder) return false;
+    const ext = this.getExtension(clean);
+    if (!ext) return false;
     const name = clean.split('/').pop() || '';
     const baseName = name.replace(/\.[^/.]+$/, '');
     return /^(sans titre|untitled|nouvelle note|new note)(\s\d+)?$/i.test(baseName.trim());
@@ -199,6 +217,9 @@ export class SyncEngine {
   public requestDocFromServer(rawPath: string): void {
     const path = normalizePath(rawPath);
     if (!this.shouldSync(path)) return;
+    if (!this.isCrdtDoc(path)) return;
+    const existing = this.getFileByNormalizedPath(path);
+    if (existing instanceof TFolder) return;
     if (this.wsClient.getStatus() === 'connected') {
       this.wsClient.send({
         type: 'doc_request',
@@ -392,7 +413,8 @@ export class SyncEngine {
   }
 
   private isAttachmentPath(path: string): boolean {
-    const ext = path.split('.').pop()?.toLowerCase();
+    const ext = this.getExtension(path);
+    if (!ext) return false;
     return ext !== 'md' && ext !== 'txt' && ext !== 'canvas';
   }
 
@@ -401,6 +423,17 @@ export class SyncEngine {
     if (!this.shouldSync(cleanPath)) return;
     if (this.isLocked(cleanPath)) return;
     if (this.isReadOnly()) return;
+
+    if (file instanceof TFolder) {
+      this.wsClient.send({
+        type: 'file_event',
+        action: 'create',
+        path: cleanPath,
+        isFolder: true,
+        mtime: Date.now(),
+      });
+      return;
+    }
 
     if (file instanceof TFile) {
       // If this is an untitled placeholder note (e.g. 'Sans titre.md', 'Untitled.md') and is currently empty:
@@ -456,19 +489,23 @@ export class SyncEngine {
     if (this.isLocked(cleanPath)) return;
     if (this.isReadOnly()) return;
 
+    const isFolder = file instanceof TFolder;
     this.renamedOrDeletedPaths.set(cleanPath, null);
-    this.removeDoc(cleanPath);
-    this.serverKnownFiles.delete(cleanPath);
-    this.untrackSyncedFile(cleanPath);
+    if (!isFolder) {
+      this.removeDoc(cleanPath);
+      this.serverKnownFiles.delete(cleanPath);
+      this.untrackSyncedFile(cleanPath);
+    }
     this.recordHistory({
       type: 'file_event',
       path: cleanPath,
-      summary: `Deleted file ${file.name}`,
+      summary: `Deleted ${isFolder ? 'folder' : 'file'} ${file.name}`,
     });
     this.wsClient.send({
       type: 'file_event',
       action: 'delete',
       path: cleanPath,
+      isFolder,
       mtime: Date.now(),
     });
   }
@@ -479,6 +516,20 @@ export class SyncEngine {
     if (!this.shouldSync(cleanPath) && !this.shouldSync(cleanOldPath)) return;
     if (this.isLocked(cleanPath) || this.isLocked(cleanOldPath)) return;
     if (this.isReadOnly()) return;
+
+    if (file instanceof TFolder) {
+      this.lockPath(cleanPath, 3000);
+      this.lockPath(cleanOldPath, 3000);
+      this.wsClient.send({
+        type: 'file_event',
+        action: 'rename',
+        path: cleanPath,
+        oldPath: cleanOldPath,
+        isFolder: true,
+        mtime: Date.now(),
+      });
+      return;
+    }
 
     // Check if the old path was an unbroadcast untitled placeholder note
     if (this.unbroadcastUntitled.has(cleanOldPath)) {
@@ -637,6 +688,9 @@ export class SyncEngine {
   private async handleDocResponse(rawPath: string, updateB64: string): Promise<void> {
     let path = normalizePath(rawPath);
     if (!this.shouldSync(path)) return;
+    if (!this.isCrdtDoc(path)) return;
+    const existingAbstract = this.getFileByNormalizedPath(path);
+    if (existingAbstract instanceof TFolder) return;
 
     // Check if this doc was deleted or renamed while doc_request was in flight
     const redirection = this.renamedOrDeletedPaths.get(path);
@@ -795,18 +849,18 @@ export class SyncEngine {
   }
 
   private async writeToVaultSafely(path: string, content: string): Promise<void> {
-    let abstractFile = this.getFileByNormalizedPath(path);
-    this.lockPath(path, 1500);
+    const cleanPath = normalizePath(path);
+    if (!this.isCrdtDoc(cleanPath)) {
+      return; // NEVER write CRDT text content to an extensionless file or folder path!
+    }
 
-    // If an accidental folder with this exact path exists (e.g. from legacy v1.1.9), trash it first
+    let abstractFile = this.getFileByNormalizedPath(cleanPath);
+    this.lockPath(cleanPath, 1500);
+
+    // If an existing item at this path is a folder, NEVER OVERWRITE OR TRASH IT!
     if (abstractFile instanceof TFolder) {
-      try {
-        await this.app.fileManager.trashFile(abstractFile);
-        abstractFile = null;
-      } catch (e: unknown) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, errMsg);
-      }
+      console.warn(`[Kurotsuki] writeToVaultSafely skipped: ${cleanPath} is a folder.`);
+      return;
     }
 
     try {
@@ -816,12 +870,12 @@ export class SyncEngine {
           await this.app.vault.modify(abstractFile, content);
         }
       } else if (!abstractFile) {
-        await this.ensureParentFolderExists(path);
-        await this.app.vault.create(path, content);
+        await this.ensureParentFolderExists(cleanPath);
+        await this.app.vault.create(cleanPath, content);
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[Kurotsuki] Error writing remote change to ${path}:`, errMsg);
+      console.error(`[Kurotsuki] Error writing remote change to ${cleanPath}:`, errMsg);
     }
   }
 
@@ -846,28 +900,43 @@ export class SyncEngine {
       if (action === 'delete') {
         this.renamedOrDeletedPaths.set(cleanPath, null);
         if (file) {
-          this.removeDoc(cleanPath);
-          this.serverKnownFiles.delete(cleanPath);
-          this.untrackSyncedFile(cleanPath);
+          if (file instanceof TFile) {
+            this.removeDoc(cleanPath);
+            this.serverKnownFiles.delete(cleanPath);
+            this.untrackSyncedFile(cleanPath);
+          }
           await this.app.fileManager.trashFile(file);
         }
-      } else if (action === 'rename' && cleanOldPath) {
+        return;
+      }
+
+      // Handle folder creation and folder rename
+      if (msg.isFolder || (!this.getExtension(cleanPath) && !(file instanceof TFile))) {
+        if (action === 'rename' && cleanOldPath) {
+          const oldFolder = this.getFileByNormalizedPath(cleanOldPath);
+          if (oldFolder instanceof TFolder) {
+            await this.app.fileManager.renameFile(oldFolder, cleanPath);
+          } else {
+            const newFolder = this.getFileByNormalizedPath(cleanPath);
+            if (!newFolder) {
+              await this.app.vault.createFolder(cleanPath);
+            }
+          }
+        } else if (action === 'create') {
+          const existingFolder = this.getFileByNormalizedPath(cleanPath);
+          if (!existingFolder) {
+            await this.app.vault.createFolder(cleanPath);
+          }
+        }
+        return;
+      }
+
+      if (action === 'rename' && cleanOldPath) {
         if (!this.shouldSync(cleanPath) && !this.shouldSync(cleanOldPath)) return;
 
         this.lockPath(cleanPath, 3000);
         this.lockPath(cleanOldPath, 3000);
         this.renamedOrDeletedPaths.set(cleanOldPath, cleanPath);
-
-        // If an accidental folder was created with the new file's name, remove it
-        const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
-        if (conflictingFolder && conflictingFolder instanceof TFolder) {
-          try {
-            await this.app.fileManager.trashFile(conflictingFolder);
-          } catch (e: unknown) {
-            const errMsg = e instanceof Error ? e.message : String(e);
-            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, errMsg);
-          }
-        }
 
         const oldFile = this.getFileByNormalizedPath(cleanOldPath);
         if (oldFile && oldFile instanceof TFile) {
@@ -887,7 +956,7 @@ export class SyncEngine {
             try {
               await this.app.fileManager.trashFile(oldFile);
             } catch { /* ignored */ }
-          } else {
+          } else if (!existingTarget) {
             try {
               await this.app.fileManager.renameFile(oldFile, cleanPath);
             } catch {
@@ -912,10 +981,12 @@ export class SyncEngine {
           this.serverKnownFiles.delete(cleanOldPath);
           this.serverKnownFiles.add(cleanPath);
           this.trackSyncedFile(cleanPath);
-          this.wsClient.send({
-            type: 'doc_request',
-            path: cleanPath,
-          });
+          if (this.isCrdtDoc(cleanPath)) {
+            this.wsClient.send({
+              type: 'doc_request',
+              path: cleanPath,
+            });
+          }
 
           // Delayed cleanup: if oldFile was in-flight and gets created shortly after, trash it
           window.setTimeout(async () => {
@@ -935,7 +1006,7 @@ export class SyncEngine {
         this.serverKnownFiles.add(cleanPath);
         if (this.isAttachmentPath(cleanPath)) {
           await this.downloadAttachment(cleanPath);
-        } else {
+        } else if (this.isCrdtDoc(cleanPath)) {
           this.wsClient.send({
             type: 'doc_request',
             path: cleanPath,

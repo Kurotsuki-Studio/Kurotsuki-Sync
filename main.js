@@ -9336,8 +9336,27 @@ var SyncEngine = class {
     this.wsClient = wsClient;
     this.wsClient.onMessage((msg) => this.handleServerMessage(msg));
   }
+  getExtension(filePath) {
+    const clean = normalizePath(filePath);
+    const lastSlash = clean.lastIndexOf("/");
+    const fileName = lastSlash >= 0 ? clean.substring(lastSlash + 1) : clean;
+    const dotIndex = fileName.lastIndexOf(".");
+    if (dotIndex <= 0)
+      return "";
+    return fileName.substring(dotIndex + 1).toLowerCase();
+  }
+  isCrdtDoc(filePath) {
+    const ext = this.getExtension(filePath);
+    return ext === "md" || ext === "txt" || ext === "canvas";
+  }
   isUntitledFile(filePath) {
     const clean = normalizePath(filePath);
+    const existing = this.getFileByNormalizedPath(clean);
+    if (existing instanceof import_obsidian3.TFolder)
+      return false;
+    const ext = this.getExtension(clean);
+    if (!ext)
+      return false;
     const name = clean.split("/").pop() || "";
     const baseName = name.replace(/\.[^/.]+$/, "");
     return /^(sans titre|untitled|nouvelle note|new note)(\s\d+)?$/i.test(baseName.trim());
@@ -9472,6 +9491,11 @@ var SyncEngine = class {
   requestDocFromServer(rawPath) {
     const path = normalizePath(rawPath);
     if (!this.shouldSync(path))
+      return;
+    if (!this.isCrdtDoc(path))
+      return;
+    const existing = this.getFileByNormalizedPath(path);
+    if (existing instanceof import_obsidian3.TFolder)
       return;
     if (this.wsClient.getStatus() === "connected") {
       this.wsClient.send({
@@ -9630,7 +9654,9 @@ var SyncEngine = class {
     delete map2[path];
   }
   isAttachmentPath(path) {
-    const ext = path.split(".").pop()?.toLowerCase();
+    const ext = this.getExtension(path);
+    if (!ext)
+      return false;
     return ext !== "md" && ext !== "txt" && ext !== "canvas";
   }
   async onLocalFileCreated(file) {
@@ -9641,6 +9667,16 @@ var SyncEngine = class {
       return;
     if (this.isReadOnly())
       return;
+    if (file instanceof import_obsidian3.TFolder) {
+      this.wsClient.send({
+        type: "file_event",
+        action: "create",
+        path: cleanPath,
+        isFolder: true,
+        mtime: Date.now()
+      });
+      return;
+    }
     if (file instanceof import_obsidian3.TFile) {
       if (this.isUntitledFile(cleanPath)) {
         const content = await this.app.vault.read(file);
@@ -9691,19 +9727,23 @@ var SyncEngine = class {
       return;
     if (this.isReadOnly())
       return;
+    const isFolder = file instanceof import_obsidian3.TFolder;
     this.renamedOrDeletedPaths.set(cleanPath, null);
-    this.removeDoc(cleanPath);
-    this.serverKnownFiles.delete(cleanPath);
-    this.untrackSyncedFile(cleanPath);
+    if (!isFolder) {
+      this.removeDoc(cleanPath);
+      this.serverKnownFiles.delete(cleanPath);
+      this.untrackSyncedFile(cleanPath);
+    }
     this.recordHistory({
       type: "file_event",
       path: cleanPath,
-      summary: `Deleted file ${file.name}`
+      summary: `Deleted ${isFolder ? "folder" : "file"} ${file.name}`
     });
     this.wsClient.send({
       type: "file_event",
       action: "delete",
       path: cleanPath,
+      isFolder,
       mtime: Date.now()
     });
   }
@@ -9716,6 +9756,19 @@ var SyncEngine = class {
       return;
     if (this.isReadOnly())
       return;
+    if (file instanceof import_obsidian3.TFolder) {
+      this.lockPath(cleanPath, 3e3);
+      this.lockPath(cleanOldPath, 3e3);
+      this.wsClient.send({
+        type: "file_event",
+        action: "rename",
+        path: cleanPath,
+        oldPath: cleanOldPath,
+        isFolder: true,
+        mtime: Date.now()
+      });
+      return;
+    }
     if (this.unbroadcastUntitled.has(cleanOldPath)) {
       this.unbroadcastUntitled.delete(cleanOldPath);
       if (file instanceof import_obsidian3.TFile) {
@@ -9852,6 +9905,11 @@ var SyncEngine = class {
     let path = normalizePath(rawPath);
     if (!this.shouldSync(path))
       return;
+    if (!this.isCrdtDoc(path))
+      return;
+    const existingAbstract = this.getFileByNormalizedPath(path);
+    if (existingAbstract instanceof import_obsidian3.TFolder)
+      return;
     const redirection = this.renamedOrDeletedPaths.get(path);
     if (redirection === null) {
       return;
@@ -9985,16 +10043,15 @@ var SyncEngine = class {
     }
   }
   async writeToVaultSafely(path, content) {
-    let abstractFile = this.getFileByNormalizedPath(path);
-    this.lockPath(path, 1500);
+    const cleanPath = normalizePath(path);
+    if (!this.isCrdtDoc(cleanPath)) {
+      return;
+    }
+    let abstractFile = this.getFileByNormalizedPath(cleanPath);
+    this.lockPath(cleanPath, 1500);
     if (abstractFile instanceof import_obsidian3.TFolder) {
-      try {
-        await this.app.fileManager.trashFile(abstractFile);
-        abstractFile = null;
-      } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, errMsg);
-      }
+      console.warn(`[Kurotsuki] writeToVaultSafely skipped: ${cleanPath} is a folder.`);
+      return;
     }
     try {
       if (abstractFile instanceof import_obsidian3.TFile) {
@@ -10003,12 +10060,12 @@ var SyncEngine = class {
           await this.app.vault.modify(abstractFile, content);
         }
       } else if (!abstractFile) {
-        await this.ensureParentFolderExists(path);
-        await this.app.vault.create(path, content);
+        await this.ensureParentFolderExists(cleanPath);
+        await this.app.vault.create(cleanPath, content);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[Kurotsuki] Error writing remote change to ${path}:`, errMsg);
+      console.error(`[Kurotsuki] Error writing remote change to ${cleanPath}:`, errMsg);
     }
   }
   async handleRemoteFileEvent(msg) {
@@ -10030,26 +10087,40 @@ var SyncEngine = class {
       if (action === "delete") {
         this.renamedOrDeletedPaths.set(cleanPath, null);
         if (file) {
-          this.removeDoc(cleanPath);
-          this.serverKnownFiles.delete(cleanPath);
-          this.untrackSyncedFile(cleanPath);
+          if (file instanceof import_obsidian3.TFile) {
+            this.removeDoc(cleanPath);
+            this.serverKnownFiles.delete(cleanPath);
+            this.untrackSyncedFile(cleanPath);
+          }
           await this.app.fileManager.trashFile(file);
         }
-      } else if (action === "rename" && cleanOldPath) {
+        return;
+      }
+      if (msg.isFolder || !this.getExtension(cleanPath) && !(file instanceof import_obsidian3.TFile)) {
+        if (action === "rename" && cleanOldPath) {
+          const oldFolder = this.getFileByNormalizedPath(cleanOldPath);
+          if (oldFolder instanceof import_obsidian3.TFolder) {
+            await this.app.fileManager.renameFile(oldFolder, cleanPath);
+          } else {
+            const newFolder = this.getFileByNormalizedPath(cleanPath);
+            if (!newFolder) {
+              await this.app.vault.createFolder(cleanPath);
+            }
+          }
+        } else if (action === "create") {
+          const existingFolder = this.getFileByNormalizedPath(cleanPath);
+          if (!existingFolder) {
+            await this.app.vault.createFolder(cleanPath);
+          }
+        }
+        return;
+      }
+      if (action === "rename" && cleanOldPath) {
         if (!this.shouldSync(cleanPath) && !this.shouldSync(cleanOldPath))
           return;
         this.lockPath(cleanPath, 3e3);
         this.lockPath(cleanOldPath, 3e3);
         this.renamedOrDeletedPaths.set(cleanOldPath, cleanPath);
-        const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
-        if (conflictingFolder && conflictingFolder instanceof import_obsidian3.TFolder) {
-          try {
-            await this.app.fileManager.trashFile(conflictingFolder);
-          } catch (e) {
-            const errMsg = e instanceof Error ? e.message : String(e);
-            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, errMsg);
-          }
-        }
         const oldFile = this.getFileByNormalizedPath(cleanOldPath);
         if (oldFile && oldFile instanceof import_obsidian3.TFile) {
           const doc2 = this.docs.get(cleanOldPath);
@@ -10068,7 +10139,7 @@ var SyncEngine = class {
               await this.app.fileManager.trashFile(oldFile);
             } catch {
             }
-          } else {
+          } else if (!existingTarget) {
             try {
               await this.app.fileManager.renameFile(oldFile, cleanPath);
             } catch {
@@ -10092,10 +10163,12 @@ var SyncEngine = class {
           this.serverKnownFiles.delete(cleanOldPath);
           this.serverKnownFiles.add(cleanPath);
           this.trackSyncedFile(cleanPath);
-          this.wsClient.send({
-            type: "doc_request",
-            path: cleanPath
-          });
+          if (this.isCrdtDoc(cleanPath)) {
+            this.wsClient.send({
+              type: "doc_request",
+              path: cleanPath
+            });
+          }
           window.setTimeout(async () => {
             const strayOld = this.getFileByNormalizedPath(cleanOldPath);
             if (strayOld && strayOld instanceof import_obsidian3.TFile) {
@@ -10113,7 +10186,7 @@ var SyncEngine = class {
         this.serverKnownFiles.add(cleanPath);
         if (this.isAttachmentPath(cleanPath)) {
           await this.downloadAttachment(cleanPath);
-        } else {
+        } else if (this.isCrdtDoc(cleanPath)) {
           this.wsClient.send({
             type: "doc_request",
             path: cleanPath
@@ -11079,6 +11152,10 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         this.awareness.updateActiveFile(cleanNew);
         this.broadcastLocalAwareness();
       }
+      const targetAbstract = this.app.vault.getAbstractFileByPath(cleanNew);
+      if (targetAbstract instanceof import_obsidian8.TFolder) {
+        return;
+      }
       this.syncEngine.requestDocFromServer(cleanNew);
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.file) {
@@ -11119,7 +11196,10 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         this.broadcastLocalAwareness();
       }
       if (cleanPath) {
-        this.syncEngine.requestDocFromServer(cleanPath);
+        const targetAbstract = this.app.vault.getAbstractFileByPath(cleanPath);
+        if (!(targetAbstract instanceof import_obsidian8.TFolder)) {
+          this.syncEngine.requestDocFromServer(cleanPath);
+        }
       }
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.editor) {

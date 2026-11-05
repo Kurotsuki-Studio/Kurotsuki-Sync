@@ -1,4 +1,4 @@
-import { Editor, MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { Editor, MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import { EditorView } from '@codemirror/view';
 import { AwarenessManager } from './awareness';
 import { createCollabExtension, rebindEffect, setReadOnlyEffect } from './cm6-collab';
@@ -117,6 +117,10 @@ export default class KurotsukiSyncPlugin extends Plugin {
         this.awareness.updateActiveFile(cleanNew);
         this.broadcastLocalAwareness();
       }
+      const targetAbstract = this.app.vault.getAbstractFileByPath(cleanNew);
+      if (targetAbstract instanceof TFolder) {
+        return;
+      }
       this.syncEngine.requestDocFromServer(cleanNew);
       this.app.workspace.iterateAllLeaves((leaf) => {
         if (leaf.view instanceof MarkdownView && leaf.view.file) {
@@ -162,7 +166,10 @@ export default class KurotsukiSyncPlugin extends Plugin {
         this.broadcastLocalAwareness();
       }
       if (cleanPath) {
-        this.syncEngine.requestDocFromServer(cleanPath);
+        const targetAbstract = this.app.vault.getAbstractFileByPath(cleanPath);
+        if (!(targetAbstract instanceof TFolder)) {
+          this.syncEngine.requestDocFromServer(cleanPath);
+        }
       }
       // Notify CM6 editor plugins in open leaves to rebind to current active document
       this.app.workspace.iterateAllLeaves((leaf) => {

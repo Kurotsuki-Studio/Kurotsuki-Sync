@@ -99,7 +99,7 @@ export type WSMessage =
   | { type: 'auth_ack'; success: boolean; message?: string; serverVersion: string; role?: UserRole; vaultId?: string }
   | { type: 'yjs_sync'; path: string; update: string }
   | { type: 'awareness_update'; states: PeerAwarenessState[] }
-  | { type: 'file_event'; action: 'create' | 'modify' | 'delete' | 'rename'; path: string; oldPath?: string; hash?: string; mtime?: number }
+  | { type: 'file_event'; action: 'create' | 'modify' | 'delete' | 'rename'; path: string; oldPath?: string; hash?: string; mtime?: number; isFolder?: boolean }
   | { type: 'file_list_request' }
   | { type: 'file_list_response'; files: Array<{ path: string; hash?: string; mtime: number; isAttachment?: boolean }> }
   | { type: 'doc_request'; path: string }
