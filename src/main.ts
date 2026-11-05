@@ -106,9 +106,35 @@ export default class KurotsukiSyncPlugin extends Plugin {
       })
     );
 
+    const handleFileRenamed = (newPath: string, oldPath: string) => {
+      const cleanNew = normalizePath(newPath);
+      const cleanOld = normalizePath(oldPath);
+      if (previousActivePath === cleanOld) {
+        previousActivePath = cleanNew;
+      }
+      if (this.awareness.getLocalState().activeFile === cleanOld) {
+        this.awareness.updateActiveFile(cleanNew);
+        this.broadcastLocalAwareness();
+      }
+      this.syncEngine.requestDocFromServer(cleanNew);
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view instanceof MarkdownView && leaf.view.editor) {
+          const host = leaf.view.editor as unknown as CMEditorHost;
+          if (host.cm && typeof host.cm.dispatch === 'function') {
+            host.cm.dispatch({
+              effects: [rebindEffect.of()],
+            });
+          }
+        }
+      });
+    };
+
+    this.syncEngine.onFileRenamed = handleFileRenamed;
+
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
         this.syncEngine.onLocalFileRenamed(file, oldPath);
+        handleFileRenamed(file.path, oldPath);
       })
     );
 

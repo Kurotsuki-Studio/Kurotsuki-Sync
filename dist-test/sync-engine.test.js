@@ -19540,7 +19540,7 @@ function base64ToUint8Array(base64) {
 function normalizePath(path) {
   if (!path)
     return "";
-  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return path.normalize("NFC").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 }
 
 // src/awareness.ts

@@ -64,7 +64,7 @@ function base64ToUint8Array(base64) {
 function normalizePath(path) {
   if (!path)
     return "";
-  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return path.normalize("NFC").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 }
 
 // src/awareness.ts
@@ -381,7 +381,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (!rawPath) {
           return;
         }
-        const path = normalizePath(rawPath);
+        const path = normalizePath(rawPath).normalize("NFC");
         if (this.view.hasFocus || !awareness.getLocalState().activeFile) {
           if (awareness.getLocalState().activeFile !== path) {
             awareness.updateActiveFile(path);
@@ -463,11 +463,7 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
             if (doc2) {
               const currentCmText = update.state.doc.toString();
               const oldYText = yText.toString();
-              if (oldYText.length === 0 && currentCmText.length > 0) {
-                doc2.transact(() => {
-                  yText.insert(0, currentCmText);
-                }, "cm6");
-              } else if (oldYText !== currentCmText) {
+              if (oldYText !== currentCmText) {
                 const changes = computeTextChanges(oldYText, currentCmText);
                 doc2.transact(() => {
                   for (const c of changes) {
@@ -9323,10 +9319,32 @@ var SyncEngine = class {
     this.pendingOutgoingTimers = /* @__PURE__ */ new Map();
     this.historyLogs = [];
     this.lastUpdatePerFile = /* @__PURE__ */ new Map();
+    this.serverKnownFiles = /* @__PURE__ */ new Set();
     this.app = app;
     this.settings = settings;
     this.wsClient = wsClient;
     this.wsClient.onMessage((msg) => this.handleServerMessage(msg));
+  }
+  getFileByNormalizedPath(rawPath) {
+    if (!rawPath)
+      return null;
+    const clean = normalizePath(rawPath);
+    const direct = this.app.vault.getAbstractFileByPath(clean);
+    if (direct)
+      return direct;
+    const nfc = clean.normalize("NFC");
+    const nfd = clean.normalize("NFD");
+    const directNfc = this.app.vault.getAbstractFileByPath(nfc);
+    if (directNfc)
+      return directNfc;
+    const directNfd = this.app.vault.getAbstractFileByPath(nfd);
+    if (directNfd)
+      return directNfd;
+    const all2 = this.app.vault.getAllLoadedFiles();
+    return all2.find((f) => {
+      const fnfc = normalizePath(f.path);
+      return fnfc === nfc || fnfc === nfd;
+    }) || null;
   }
   updateSettings(settings) {
     this.settings = settings;
@@ -9415,8 +9433,11 @@ var SyncEngine = class {
     if (!doc2) {
       doc2 = new Doc();
       const yText = doc2.getText("content");
-      if (initialContent !== void 0 && yText.length === 0) {
+      const isKnownOnServer = this.serverKnownFiles.has(path);
+      if (!isKnownOnServer && initialContent !== void 0 && yText.length === 0) {
         yText.insert(0, initialContent);
+      } else if (isKnownOnServer) {
+        this.requestDocFromServer(path);
       }
       doc2.on("update", (update, origin) => {
         if (origin === "remote" || origin === "internal")
@@ -9622,50 +9643,58 @@ var SyncEngine = class {
     }
   }
   onLocalFileDeleted(file) {
-    if (!this.shouldSync(file.path))
+    const cleanPath = normalizePath(file.path);
+    if (!this.shouldSync(cleanPath))
       return;
-    if (this.isLocked(file.path))
+    if (this.isLocked(cleanPath))
       return;
     if (this.isReadOnly())
       return;
-    this.removeDoc(file.path);
-    this.untrackSyncedFile(file.path);
+    this.removeDoc(cleanPath);
+    this.serverKnownFiles.delete(cleanPath);
+    this.untrackSyncedFile(cleanPath);
     this.recordHistory({
       type: "file_event",
-      path: file.path,
+      path: cleanPath,
       summary: `Deleted file ${file.name}`
     });
     this.wsClient.send({
       type: "file_event",
       action: "delete",
-      path: file.path,
+      path: cleanPath,
       mtime: Date.now()
     });
   }
-  onLocalFileRenamed(file, oldPath) {
-    if (!this.shouldSync(file.path) && !this.shouldSync(oldPath))
+  onLocalFileRenamed(file, rawOldPath) {
+    const cleanPath = normalizePath(file.path);
+    const cleanOldPath = normalizePath(rawOldPath);
+    if (!this.shouldSync(cleanPath) && !this.shouldSync(cleanOldPath))
       return;
-    if (this.isLocked(file.path) || this.isLocked(oldPath))
+    if (this.isLocked(cleanPath) || this.isLocked(cleanOldPath))
       return;
     if (this.isReadOnly())
       return;
-    const doc2 = this.docs.get(oldPath);
+    this.lockPath(cleanPath, 3e3);
+    this.lockPath(cleanOldPath, 3e3);
+    const doc2 = this.docs.get(cleanOldPath);
     if (doc2) {
-      this.docs.delete(oldPath);
-      this.docs.set(file.path, doc2);
+      this.docs.delete(cleanOldPath);
+      this.docs.set(cleanPath, doc2);
     }
-    this.untrackSyncedFile(oldPath);
-    this.trackSyncedFile(file.path);
+    this.serverKnownFiles.delete(cleanOldPath);
+    this.serverKnownFiles.add(cleanPath);
+    this.untrackSyncedFile(cleanOldPath);
+    this.trackSyncedFile(cleanPath);
     this.recordHistory({
       type: "file_event",
-      path: file.path,
-      summary: `Renamed file from ${oldPath} to ${file.path}`
+      path: cleanPath,
+      summary: `Renamed file from ${cleanOldPath} to ${cleanPath}`
     });
     this.wsClient.send({
       type: "file_event",
       action: "rename",
-      path: file.path,
-      oldPath,
+      path: cleanPath,
+      oldPath: cleanOldPath,
       mtime: Date.now()
     });
   }
@@ -9705,49 +9734,53 @@ var SyncEngine = class {
     }
   }
   async handleFileListResponse(remoteFiles) {
-    const remotePaths = new Set(remoteFiles.map((f) => f.path));
+    const remotePaths = new Set(remoteFiles.map((f) => normalizePath(f.path)));
+    this.serverKnownFiles = remotePaths;
     for (const rf of remoteFiles) {
-      if (!this.shouldSync(rf.path))
+      const cleanRemotePath = normalizePath(rf.path);
+      if (!this.shouldSync(cleanRemotePath))
         continue;
-      const localFile = this.app.vault.getAbstractFileByPath(rf.path);
+      const localFile = this.getFileByNormalizedPath(cleanRemotePath);
       if (!localFile) {
-        this.trackSyncedFile(rf.path);
-        if (rf.isAttachment || this.isAttachmentPath(rf.path)) {
-          await this.downloadAttachment(rf.path);
+        this.trackSyncedFile(cleanRemotePath);
+        if (rf.isAttachment || this.isAttachmentPath(cleanRemotePath)) {
+          await this.downloadAttachment(cleanRemotePath);
         } else {
           this.wsClient.send({
             type: "doc_request",
-            path: rf.path
+            path: cleanRemotePath
           });
         }
       } else {
-        this.trackSyncedFile(rf.path);
+        this.trackSyncedFile(cleanRemotePath);
       }
     }
     const localFiles = this.app.vault.getFiles();
     for (const file of localFiles) {
-      if (!this.shouldSync(file.path))
+      const cleanLocalPath = normalizePath(file.path);
+      if (!this.shouldSync(cleanLocalPath))
         continue;
-      if (!remotePaths.has(file.path)) {
+      if (!remotePaths.has(cleanLocalPath)) {
         if (!this.isReadOnly()) {
-          this.trackSyncedFile(file.path);
-          if (this.isAttachmentPath(file.path)) {
+          this.trackSyncedFile(cleanLocalPath);
+          this.serverKnownFiles.add(cleanLocalPath);
+          if (this.isAttachmentPath(cleanLocalPath)) {
             if (this.settings.syncAttachments) {
               await this.syncAttachment(file);
             }
           } else {
             const content = await this.app.vault.read(file);
-            const doc2 = this.getOrCreateDoc(file.path, content);
+            const doc2 = this.getOrCreateDoc(cleanLocalPath, content);
             const state = encodeStateAsUpdate(doc2);
             this.wsClient.send({
               type: "file_event",
               action: "create",
-              path: file.path,
+              path: cleanLocalPath,
               mtime: file.stat.mtime
             });
             this.wsClient.send({
               type: "yjs_sync",
-              path: file.path,
+              path: cleanLocalPath,
               update: uint8ArrayToBase64(state)
             });
             await new Promise((resolve) => setTimeout(resolve, 15));
@@ -9764,9 +9797,10 @@ var SyncEngine = class {
     const doc2 = this.getOrCreateDoc(path);
     applyUpdate(doc2, update, "remote");
     this.trackSyncedFile(path);
+    this.serverKnownFiles.add(path);
     const yText = doc2.getText("content");
     if (yText.length === 0) {
-      const file = this.app.vault.getAbstractFileByPath(path);
+      const file = this.getFileByNormalizedPath(path);
       if (file instanceof import_obsidian3.TFile) {
         try {
           const content = await this.app.vault.read(file);
@@ -9788,7 +9822,7 @@ var SyncEngine = class {
     }
     if (!this.isOpenInEditor(path)) {
       const content = yText.toString();
-      const abstractFile = this.app.vault.getAbstractFileByPath(path);
+      const abstractFile = this.getFileByNormalizedPath(path);
       if (abstractFile instanceof import_obsidian3.TFile) {
         const diskContent = await this.app.vault.read(abstractFile);
         if (diskContent === content) {
@@ -9813,7 +9847,7 @@ var SyncEngine = class {
         const arrayBuffer = res.arrayBuffer;
         this.lockPath(relativePath, 2e3);
         await this.ensureFolderExists(relativePath);
-        const existing = this.app.vault.getAbstractFileByPath(relativePath);
+        const existing = this.getFileByNormalizedPath(relativePath);
         if (existing instanceof import_obsidian3.TFile) {
           await this.app.vault.modifyBinary(existing, arrayBuffer);
         } else if (!existing) {
@@ -9895,7 +9929,7 @@ var SyncEngine = class {
     }
   }
   async writeToVaultSafely(path, content) {
-    const abstractFile = this.app.vault.getAbstractFileByPath(path);
+    const abstractFile = this.getFileByNormalizedPath(path);
     this.lockPath(path, 1500);
     try {
       if (abstractFile instanceof import_obsidian3.TFile) {
@@ -9916,45 +9950,57 @@ var SyncEngine = class {
     }
   }
   async handleRemoteFileEvent(msg) {
-    const { action, path, oldPath } = msg;
-    if (!this.shouldSync(path))
+    const cleanPath = normalizePath(msg.path);
+    const cleanOldPath = msg.oldPath ? normalizePath(msg.oldPath) : void 0;
+    const { action } = msg;
+    if (!this.shouldSync(cleanPath))
       return;
-    this.lockPath(path, 2e3);
-    if (oldPath)
-      this.lockPath(oldPath, 2e3);
+    this.lockPath(cleanPath, 2e3);
+    if (cleanOldPath)
+      this.lockPath(cleanOldPath, 2e3);
     this.recordHistory({
       type: "file_event",
-      path,
-      summary: `Remote file event: ${action} on ${path}`
+      path: cleanPath,
+      summary: `Remote file event: ${action} on ${cleanPath}`
     });
     try {
-      const file = this.app.vault.getAbstractFileByPath(path);
+      const file = this.getFileByNormalizedPath(cleanPath);
       if (action === "delete") {
         if (file) {
-          this.removeDoc(path);
-          this.untrackSyncedFile(path);
+          this.removeDoc(cleanPath);
+          this.serverKnownFiles.delete(cleanPath);
+          this.untrackSyncedFile(cleanPath);
           await this.app.fileManager.trashFile(file);
         }
-      } else if (action === "rename" && oldPath) {
-        const oldFile = this.app.vault.getAbstractFileByPath(oldPath);
+      } else if (action === "rename" && cleanOldPath) {
+        if (!this.shouldSync(cleanPath) && !this.shouldSync(cleanOldPath))
+          return;
+        this.lockPath(cleanPath, 3e3);
+        this.lockPath(cleanOldPath, 3e3);
+        const oldFile = this.getFileByNormalizedPath(cleanOldPath);
         if (oldFile) {
-          const doc2 = this.docs.get(oldPath);
+          const doc2 = this.docs.get(cleanOldPath);
           if (doc2) {
-            this.docs.delete(oldPath);
-            this.docs.set(path, doc2);
+            this.docs.delete(cleanOldPath);
+            this.docs.set(cleanPath, doc2);
           }
-          this.untrackSyncedFile(oldPath);
-          this.trackSyncedFile(path);
-          await this.app.fileManager.renameFile(oldFile, path);
+          this.serverKnownFiles.delete(cleanOldPath);
+          this.serverKnownFiles.add(cleanPath);
+          this.untrackSyncedFile(cleanOldPath);
+          this.trackSyncedFile(cleanPath);
+          await this.ensureFolderExists(cleanPath);
+          await this.app.fileManager.renameFile(oldFile, cleanPath);
+          this.onFileRenamed?.(cleanPath, cleanOldPath);
         }
       } else if (action === "create" || action === "modify") {
-        this.trackSyncedFile(path);
-        if (this.isAttachmentPath(path)) {
-          await this.downloadAttachment(path);
+        this.trackSyncedFile(cleanPath);
+        this.serverKnownFiles.add(cleanPath);
+        if (this.isAttachmentPath(cleanPath)) {
+          await this.downloadAttachment(cleanPath);
         } else {
           this.wsClient.send({
             type: "doc_request",
-            path
+            path: cleanPath
           });
         }
       }
@@ -9998,7 +10044,7 @@ var SyncEngine = class {
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
-      const existing = this.app.vault.getAbstractFileByPath(current);
+      const existing = this.getFileByNormalizedPath(current);
       if (!existing) {
         try {
           await this.app.vault.createFolder(current);
@@ -10890,9 +10936,33 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         this.syncEngine.onLocalFileDeleted(file);
       })
     );
+    const handleFileRenamed = (newPath, oldPath) => {
+      const cleanNew = normalizePath(newPath);
+      const cleanOld = normalizePath(oldPath);
+      if (previousActivePath === cleanOld) {
+        previousActivePath = cleanNew;
+      }
+      if (this.awareness.getLocalState().activeFile === cleanOld) {
+        this.awareness.updateActiveFile(cleanNew);
+        this.broadcastLocalAwareness();
+      }
+      this.syncEngine.requestDocFromServer(cleanNew);
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view instanceof import_obsidian8.MarkdownView && leaf.view.editor) {
+          const host = leaf.view.editor;
+          if (host.cm && typeof host.cm.dispatch === "function") {
+            host.cm.dispatch({
+              effects: [rebindEffect.of()]
+            });
+          }
+        }
+      });
+    };
+    this.syncEngine.onFileRenamed = handleFileRenamed;
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.syncEngine.onLocalFileRenamed(file, oldPath);
+        handleFileRenamed(file.path, oldPath);
       })
     );
     let previousActivePath = null;

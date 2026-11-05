@@ -202,7 +202,7 @@ export function createCollabExtension(
         if (!rawPath) {
           return;
         }
-        const path = normalizePath(rawPath);
+        const path = normalizePath(rawPath).normalize('NFC');
 
         // If active file is detected, update awareness if this leaf is focused or if awareness is empty
         if (this.view.hasFocus || !awareness.getLocalState().activeFile) {
@@ -306,12 +306,7 @@ export function createCollabExtension(
             if (doc) {
               const currentCmText = update.state.doc.toString();
               const oldYText = yText.toString();
-              if (oldYText.length === 0 && currentCmText.length > 0) {
-                // Initial seed from first typing client
-                doc.transact(() => {
-                  yText.insert(0, currentCmText);
-                }, 'cm6');
-              } else if (oldYText !== currentCmText) {
+              if (oldYText !== currentCmText) {
                 const changes = computeTextChanges(oldYText, currentCmText);
                 doc.transact(() => {
                   for (const c of changes) {
