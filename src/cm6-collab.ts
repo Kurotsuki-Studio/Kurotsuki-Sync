@@ -1,4 +1,4 @@
-import { Annotation, Extension, Range, StateEffect, StateField } from '@codemirror/state';
+import { Annotation, Extension, Range, StateEffect, StateField, Transaction } from '@codemirror/state';
 import { EditorState } from '@codemirror/state';
 import {
   Decoration,
@@ -246,7 +246,10 @@ export function createCollabExtension(
               this.view.dispatch({
                 changes,
                 selection: mappedSel,
-                annotations: [remoteSyncAnnotation.of(true)],
+                annotations: [
+                  remoteSyncAnnotation.of(true),
+                  Transaction.addToHistory.of(false),
+                ],
               });
             } finally {
               this.isDispatchingRemote = false;

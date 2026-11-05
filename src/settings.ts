@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, requestUrl } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, requestUrl, type SettingDefinitionItem } from 'obsidian';
 import type KurotsukiSyncPlugin from './main';
 import { SyncMode } from './types';
 import { VaultSwitcherModal } from './ui/vault-switcher-modal';
@@ -9,6 +9,10 @@ export class KurotsukiSettingTab extends PluginSettingTab {
   constructor(app: App, plugin: KurotsukiSyncPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  override getSettingDefinitions(): SettingDefinitionItem[] {
+    return [];
   }
 
   display(): void {
@@ -187,9 +191,11 @@ export class KurotsukiSettingTab extends PluginSettingTab {
           .addOption('selective', 'Selective Shared Folders')
           .setValue(this.plugin.settings.syncMode)
           .onChange(async (val) => {
-            this.plugin.settings.syncMode = val as SyncMode;
-            await this.plugin.saveSettings();
-            this.display(); // re-render to show/hide folder list
+            if (val === 'entire_vault' || val === 'selective') {
+              this.plugin.settings.syncMode = val;
+              await this.plugin.saveSettings();
+              this.display(); // re-render to show/hide folder list
+            }
           })
       );
 

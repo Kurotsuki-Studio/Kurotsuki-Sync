@@ -540,8 +540,11 @@ export default class KurotsukiSyncPlugin extends Plugin {
     return path;
   }
 
-  async loadSettings() {
-    const data = (await this.loadData()) as Partial<KurotsukiSettings> | null;
+  async loadSettings(): Promise<void> {
+    const rawData: unknown = await this.loadData();
+    const data = typeof rawData === 'object' && rawData !== null
+      ? (rawData as Partial<KurotsukiSettings>)
+      : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data || {});
   }
 

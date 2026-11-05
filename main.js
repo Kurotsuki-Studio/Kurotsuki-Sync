@@ -39,12 +39,10 @@ function uint8ArrayToBase64(bytes) {
   if (typeof Buffer !== "undefined") {
     return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
   }
-  const CHUNK_SIZE = 8192;
-  const len = bytes.length;
   let binary = "";
-  for (let i = 0; i < len; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, len));
-    binary += String.fromCharCode.apply(null, chunk);
+  const len = bytes.length;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
 }
@@ -416,7 +414,10 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
               this.view.dispatch({
                 changes,
                 selection: mappedSel,
-                annotations: [remoteSyncAnnotation.of(true)]
+                annotations: [
+                  remoteSyncAnnotation.of(true),
+                  import_state.Transaction.addToHistory.of(false)
+                ]
               });
             } finally {
               this.isDispatchingRemote = false;
@@ -747,6 +748,9 @@ var KurotsukiSettingTab = class extends import_obsidian2.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  getSettingDefinitions() {
+    return [];
+  }
   display() {
     const { containerEl } = this;
     containerEl.empty();
@@ -853,9 +857,11 @@ var KurotsukiSettingTab = class extends import_obsidian2.PluginSettingTab {
     new import_obsidian2.Setting(containerEl).setName("\u{1F4C2} Synchronization Scope").setHeading();
     new import_obsidian2.Setting(containerEl).setName("Sync Mode").setDesc("Choose whether to sync your whole vault or only designated folders (like Relay Selective Sync)").addDropdown(
       (dropdown) => dropdown.addOption("entire_vault", "Entire Vault").addOption("selective", "Selective Shared Folders").setValue(this.plugin.settings.syncMode).onChange(async (val) => {
-        this.plugin.settings.syncMode = val;
-        await this.plugin.saveSettings();
-        this.display();
+        if (val === "entire_vault" || val === "selective") {
+          this.plugin.settings.syncMode = val;
+          await this.plugin.saveSettings();
+          this.display();
+        }
       })
     );
     if (this.plugin.settings.syncMode === "selective") {
@@ -4319,7 +4325,7 @@ var iterateStructs = (transaction, structs, clockStart, len, f) => {
     f(struct);
   } while (index < structs.length && structs[index].id.clock < clockEnd);
 };
-var Transaction = class {
+var Transaction2 = class {
   /**
    * @param {Doc} doc
    * @param {any} origin
@@ -4543,7 +4549,7 @@ var transact = (doc2, f, origin = null, local = true) => {
   let result = null;
   if (doc2._transaction === null) {
     initialCall = true;
-    doc2._transaction = new Transaction(doc2, origin, local);
+    doc2._transaction = new Transaction2(doc2, origin, local);
     transactionCleanups.push(doc2._transaction);
     if (transactionCleanups.length === 1) {
       doc2.emit("beforeAllTransactions", [doc2]);
@@ -9377,12 +9383,8 @@ var SyncEngine = class {
     if (!path)
       return false;
     const normalized = normalizePath(path);
-    if (normalized.startsWith(".") || normalized.includes("/.") || normalized.includes(".obsidian")) {
-      return false;
-    }
-    const configDir = this.app.vault.configDir;
-    const cleanConfig = configDir ? normalizePath(configDir) : null;
-    if (cleanConfig && (normalized === cleanConfig || normalized.startsWith(cleanConfig + "/"))) {
+    const configDir = this.app.vault.configDir ? normalizePath(this.app.vault.configDir) : ".obsidian";
+    if (normalized.startsWith(".") || normalized.includes("/.") || normalized === configDir || normalized.startsWith(configDir + "/") || normalized.includes("/" + configDir + "/")) {
       return false;
     }
     if (this.settings.syncMode === "entire_vault") {
@@ -9406,9 +9408,7 @@ var SyncEngine = class {
     }
     list.push(update);
     if (!this.pendingOutgoingTimers.has(path)) {
-      const timer = window.setTimeout ? window.setTimeout(() => {
-        this.flushOutgoingYjsUpdate(path);
-      }, 30) : setTimeout(() => {
+      const timer = window.setTimeout(() => {
         this.flushOutgoingYjsUpdate(path);
       }, 30);
       this.pendingOutgoingTimers.set(path, timer);
@@ -9417,11 +9417,7 @@ var SyncEngine = class {
   flushOutgoingYjsUpdate(path) {
     const timer = this.pendingOutgoingTimers.get(path);
     if (timer !== void 0) {
-      if (typeof window !== "undefined" && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
       this.pendingOutgoingTimers.delete(path);
     }
     const updates = this.pendingOutgoingUpdates.get(path);
@@ -9507,9 +9503,8 @@ var SyncEngine = class {
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
       const view = leaf.view;
-      if (view) {
-        const viewFile = view.file;
-        if (viewFile && normalizePath(viewFile.path) === path) {
+      if (view instanceof import_obsidian3.FileView && view.file) {
+        if (normalizePath(view.file.path) === path) {
           open = true;
         }
       }
@@ -9608,7 +9603,8 @@ var SyncEngine = class {
         this.trackSyncedFile(file.path);
         success++;
       } catch (err) {
-        console.error(`[Kurotsuki] Failed to push file ${file.path}:`, err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[Kurotsuki] Failed to push file ${file.path}:`, errMsg);
         failed++;
       }
     }
@@ -9846,7 +9842,7 @@ var SyncEngine = class {
               path: cleanLocalPath,
               update: uint8ArrayToBase64(state)
             });
-            await new Promise((resolve) => setTimeout(resolve, 15));
+            await new Promise((resolve) => window.setTimeout(resolve, 15));
           }
         }
       }
@@ -9886,7 +9882,8 @@ var SyncEngine = class {
             });
           }
         } catch (e) {
-          console.error(`[Kurotsuki] Error seeding doc from local file ${path}:`, e);
+          const errMsg = e instanceof Error ? e.message : String(e);
+          console.error(`[Kurotsuki] Error seeding doc from local file ${path}:`, errMsg);
         }
       }
     }
@@ -9928,7 +9925,8 @@ var SyncEngine = class {
         }
       }
     } catch (e) {
-      console.error(`[Kurotsuki] Error downloading attachment ${relativePath}:`, e);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.error(`[Kurotsuki] Error downloading attachment ${relativePath}:`, errMsg);
     }
   }
   async handleRemoteYjsSync(rawPath, updateB64) {
@@ -9961,20 +9959,9 @@ var SyncEngine = class {
   debounceDiskWrite(path, doc2) {
     const existing = this.pendingLocalDebounce.get(path);
     if (existing) {
-      if (typeof window !== "undefined" && window.clearTimeout) {
-        window.clearTimeout(existing);
-      } else {
-        clearTimeout(existing);
-      }
+      window.clearTimeout(existing);
     }
-    const timer = window.setTimeout ? window.setTimeout(async () => {
-      this.pendingLocalDebounce.delete(path);
-      if (this.isOpenInEditor(path)) {
-        return;
-      }
-      const text2 = doc2.getText("content").toString();
-      await this.writeToVaultSafely(path, text2);
-    }, 1500) : setTimeout(async () => {
+    const timer = window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
       if (this.isOpenInEditor(path)) {
         return;
@@ -9988,11 +9975,7 @@ var SyncEngine = class {
     this.flushOutgoingYjsUpdate(path);
     const timer = this.pendingLocalDebounce.get(path);
     if (timer) {
-      if (typeof window !== "undefined" && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
       this.pendingLocalDebounce.delete(path);
     }
     const doc2 = this.docs.get(path);
@@ -10006,10 +9989,11 @@ var SyncEngine = class {
     this.lockPath(path, 1500);
     if (abstractFile instanceof import_obsidian3.TFolder) {
       try {
-        await this.app.vault.trash(abstractFile, true);
+        await this.app.fileManager.trashFile(abstractFile);
         abstractFile = null;
       } catch (e) {
-        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, e);
+        const errMsg = e instanceof Error ? e.message : String(e);
+        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, errMsg);
       }
     }
     try {
@@ -10023,7 +10007,8 @@ var SyncEngine = class {
         await this.app.vault.create(path, content);
       }
     } catch (err) {
-      console.error(`[Kurotsuki] Error writing remote change to ${path}:`, err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Kurotsuki] Error writing remote change to ${path}:`, errMsg);
     }
   }
   async handleRemoteFileEvent(msg) {
@@ -10059,9 +10044,10 @@ var SyncEngine = class {
         const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
         if (conflictingFolder && conflictingFolder instanceof import_obsidian3.TFolder) {
           try {
-            await this.app.vault.trash(conflictingFolder, true);
+            await this.app.fileManager.trashFile(conflictingFolder);
           } catch (e) {
-            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, e);
+            const errMsg = e instanceof Error ? e.message : String(e);
+            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, errMsg);
           }
         }
         const oldFile = this.getFileByNormalizedPath(cleanOldPath);
@@ -10093,7 +10079,7 @@ var SyncEngine = class {
             }
           }
           this.onFileRenamed?.(cleanPath, cleanOldPath);
-          setTimeout(async () => {
+          window.setTimeout(async () => {
             const stray = this.getFileByNormalizedPath(cleanOldPath);
             if (stray && stray instanceof import_obsidian3.TFile) {
               try {
@@ -10110,13 +10096,14 @@ var SyncEngine = class {
             type: "doc_request",
             path: cleanPath
           });
-          setTimeout(async () => {
+          window.setTimeout(async () => {
             const strayOld = this.getFileByNormalizedPath(cleanOldPath);
             if (strayOld && strayOld instanceof import_obsidian3.TFile) {
               try {
                 await this.app.fileManager.trashFile(strayOld);
               } catch (e) {
-                console.warn(`[Kurotsuki] Cleaned up stray old file ${cleanOldPath}:`, e);
+                const errMsg = e instanceof Error ? e.message : String(e);
+                console.warn(`[Kurotsuki] Cleaned up stray old file ${cleanOldPath}:`, errMsg);
               }
             }
           }, 350);
@@ -10134,7 +10121,8 @@ var SyncEngine = class {
         }
       }
     } catch (err) {
-      console.error(`[Kurotsuki] Error executing remote file event ${action}:`, err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Kurotsuki] Error executing remote file event ${action}:`, errMsg);
     }
   }
   async syncAttachment(file) {
@@ -10165,7 +10153,8 @@ var SyncEngine = class {
         }
       }
     } catch (err) {
-      console.error(`[Kurotsuki] Failed to sync attachment ${file.path}:`, err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Kurotsuki] Failed to sync attachment ${file.path}:`, errMsg);
     }
   }
   async ensureParentFolderExists(filePath) {
@@ -10224,19 +10213,11 @@ var SyncEngine = class {
   resetDocs() {
     this.flushAllOutgoingUpdates();
     for (const timer of this.pendingLocalDebounce.values()) {
-      if (typeof window !== "undefined" && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
     }
     this.pendingLocalDebounce.clear();
     for (const timer of this.pendingOutgoingTimers.values()) {
-      if (typeof window !== "undefined" && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
     }
     this.pendingOutgoingTimers.clear();
     this.pendingOutgoingUpdates.clear();
@@ -10799,8 +10780,19 @@ var KurotsukiWSClient = class {
       };
       this.ws.onmessage = (event) => {
         try {
-          const raw = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
-          const msg = JSON.parse(raw);
+          let raw;
+          if (typeof event.data === "string") {
+            raw = event.data;
+          } else if (event.data instanceof ArrayBuffer) {
+            raw = new TextDecoder().decode(event.data);
+          } else {
+            return;
+          }
+          const parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== "object" || !("type" in parsed)) {
+            return;
+          }
+          const msg = parsed;
           if (msg.type === "auth_ack") {
             if (msg.success) {
               this.currentRole = msg.role || "editor";
@@ -10823,7 +10815,8 @@ var KurotsukiWSClient = class {
             }
           }
         } catch (err) {
-          console.error("[Kurotsuki] Error decoding WebSocket message:", err);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error("[Kurotsuki] Error decoding WebSocket message:", errMsg);
         }
       };
       this.ws.onerror = (err) => {
@@ -10879,7 +10872,8 @@ var KurotsukiWSClient = class {
       this.ws.send(JSON.stringify(msg));
       return true;
     } catch (err) {
-      console.error("[Kurotsuki] Failed to send WebSocket message:", err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("[Kurotsuki] Failed to send WebSocket message:", errMsg);
       return false;
     }
   }
@@ -11450,7 +11444,8 @@ ${p.split("/").pop()}`);
     return path;
   }
   async loadSettings() {
-    const data = await this.loadData();
+    const rawData = await this.loadData();
+    const data = typeof rawData === "object" && rawData !== null ? rawData : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data || {});
   }
   async saveSettings() {

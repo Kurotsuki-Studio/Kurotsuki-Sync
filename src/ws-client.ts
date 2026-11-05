@@ -101,10 +101,19 @@ export class KurotsukiWSClient {
 
       this.ws.onmessage = (event) => {
         try {
-          const raw = typeof event.data === 'string'
-            ? event.data
-            : new TextDecoder().decode(event.data as ArrayBuffer);
-          const msg = JSON.parse(raw) as WSMessage;
+          let raw: string;
+          if (typeof event.data === 'string') {
+            raw = event.data;
+          } else if (event.data instanceof ArrayBuffer) {
+            raw = new TextDecoder().decode(event.data);
+          } else {
+            return;
+          }
+          const parsed: unknown = JSON.parse(raw);
+          if (!parsed || typeof parsed !== 'object' || !('type' in parsed)) {
+            return;
+          }
+          const msg = parsed as WSMessage;
 
           if (msg.type === 'auth_ack') {
             if (msg.success) {
@@ -128,8 +137,9 @@ export class KurotsukiWSClient {
               handler(msg);
             }
           }
-        } catch (err) {
-          console.error('[Kurotsuki] Error decoding WebSocket message:', err);
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error('[Kurotsuki] Error decoding WebSocket message:', errMsg);
         }
       };
 
@@ -190,8 +200,9 @@ export class KurotsukiWSClient {
     try {
       this.ws.send(JSON.stringify(msg));
       return true;
-    } catch (err) {
-      console.error('[Kurotsuki] Failed to send WebSocket message:', err);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error('[Kurotsuki] Failed to send WebSocket message:', errMsg);
       return false;
     }
   }

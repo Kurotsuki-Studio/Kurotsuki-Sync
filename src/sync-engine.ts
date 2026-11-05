@@ -1,4 +1,4 @@
-import { App, MarkdownView, Notice, TAbstractFile, TFile, TFolder, requestUrl } from 'obsidian';
+import { App, FileView, MarkdownView, Notice, TAbstractFile, TFile, TFolder, requestUrl } from 'obsidian';
 import * as Y from 'yjs';
 import { KurotsukiSettings, SyncHistoryEntry, WSMessage } from './types';
 import { base64ToUint8Array, normalizePath, uint8ArrayToBase64 } from './utils';
@@ -80,14 +80,15 @@ export class SyncEngine {
     if (!path) return false;
     const normalized = normalizePath(path);
 
-    // Strict check: NEVER sync any hidden file or folder (e.g. .obsidian, .git, .trash, .smart-env)
-    if (normalized.startsWith('.') || normalized.includes('/.') || normalized.includes('.obsidian')) {
-      return false;
-    }
-
-    const configDir = this.app.vault.configDir;
-    const cleanConfig = configDir ? normalizePath(configDir) : null;
-    if (cleanConfig && (normalized === cleanConfig || normalized.startsWith(cleanConfig + '/'))) {
+    // Strict check: NEVER sync any hidden file or folder (e.g. configDir, .git, .trash, .smart-env)
+    const configDir = this.app.vault.configDir ? normalizePath(this.app.vault.configDir) : '.obsidian';
+    if (
+      normalized.startsWith('.') ||
+      normalized.includes('/.') ||
+      normalized === configDir ||
+      normalized.startsWith(configDir + '/') ||
+      normalized.includes('/' + configDir + '/')
+    ) {
       return false;
     }
 
@@ -116,11 +117,9 @@ export class SyncEngine {
     list.push(update);
 
     if (!this.pendingOutgoingTimers.has(path)) {
-      const timer = window.setTimeout ? window.setTimeout(() => {
+      const timer = window.setTimeout(() => {
         this.flushOutgoingYjsUpdate(path);
-      }, 30) : (setTimeout(() => {
-        this.flushOutgoingYjsUpdate(path);
-      }, 30) as unknown as number);
+      }, 30);
       this.pendingOutgoingTimers.set(path, timer);
     }
   }
@@ -128,11 +127,7 @@ export class SyncEngine {
   public flushOutgoingYjsUpdate(path: string): void {
     const timer = this.pendingOutgoingTimers.get(path);
     if (timer !== undefined) {
-      if (typeof window !== 'undefined' && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
       this.pendingOutgoingTimers.delete(path);
     }
 
@@ -241,9 +236,8 @@ export class SyncEngine {
     let open = false;
     this.app.workspace.iterateAllLeaves((leaf) => {
       const view = leaf.view;
-      if (view) {
-        const viewFile = (view as any).file;
-        if (viewFile && normalizePath(viewFile.path) === path) {
+      if (view instanceof FileView && view.file) {
+        if (normalizePath(view.file.path) === path) {
           open = true;
         }
       }
@@ -364,8 +358,9 @@ export class SyncEngine {
 
         this.trackSyncedFile(file.path);
         success++;
-      } catch (err) {
-        console.error(`[Kurotsuki] Failed to push file ${file.path}:`, err);
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[Kurotsuki] Failed to push file ${file.path}:`, errMsg);
         failed++;
       }
     }
@@ -632,7 +627,7 @@ export class SyncEngine {
               update: uint8ArrayToBase64(state),
             });
             // Small pause between file seeding to prevent starving the event loop
-            await new Promise((resolve) => setTimeout(resolve, 15));
+            await new Promise((resolve) => window.setTimeout(resolve, 15));
           }
         }
       }
@@ -677,8 +672,9 @@ export class SyncEngine {
               update: uint8ArrayToBase64(seedUpdate),
             });
           }
-        } catch (e) {
-          console.error(`[Kurotsuki] Error seeding doc from local file ${path}:`, e);
+        } catch (e: unknown) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          console.error(`[Kurotsuki] Error seeding doc from local file ${path}:`, errMsg);
         }
       }
     }
@@ -724,8 +720,9 @@ export class SyncEngine {
           await this.app.vault.createBinary(relativePath, arrayBuffer);
         }
       }
-    } catch (e) {
-      console.error(`[Kurotsuki] Error downloading attachment ${relativePath}:`, e);
+    } catch (e: unknown) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.error(`[Kurotsuki] Error downloading attachment ${relativePath}:`, errMsg);
     }
   }
 
@@ -765,14 +762,10 @@ export class SyncEngine {
   private debounceDiskWrite(path: string, doc: Y.Doc): void {
     const existing = this.pendingLocalDebounce.get(path);
     if (existing) {
-      if (typeof window !== 'undefined' && window.clearTimeout) {
-        window.clearTimeout(existing);
-      } else {
-        clearTimeout(existing);
-      }
+      window.clearTimeout(existing);
     }
 
-    const timer = window.setTimeout ? window.setTimeout(async () => {
+    const timer = window.setTimeout(async () => {
       this.pendingLocalDebounce.delete(path);
 
       // Protect active editor: do NOT overwrite the file on disk while open in editor
@@ -782,16 +775,7 @@ export class SyncEngine {
 
       const text = doc.getText('content').toString();
       await this.writeToVaultSafely(path, text);
-    }, 1500) : (setTimeout(async () => {
-      this.pendingLocalDebounce.delete(path);
-
-      if (this.isOpenInEditor(path)) {
-        return;
-      }
-
-      const text = doc.getText('content').toString();
-      await this.writeToVaultSafely(path, text);
-    }, 1500) as unknown as number);
+    }, 1500);
 
     this.pendingLocalDebounce.set(path, timer);
   }
@@ -800,11 +784,7 @@ export class SyncEngine {
     this.flushOutgoingYjsUpdate(path);
     const timer = this.pendingLocalDebounce.get(path);
     if (timer) {
-      if (typeof window !== 'undefined' && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
       this.pendingLocalDebounce.delete(path);
     }
     const doc = this.docs.get(path);
@@ -821,10 +801,11 @@ export class SyncEngine {
     // If an accidental folder with this exact path exists (e.g. from legacy v1.1.9), trash it first
     if (abstractFile instanceof TFolder) {
       try {
-        await this.app.vault.trash(abstractFile, true);
+        await this.app.fileManager.trashFile(abstractFile);
         abstractFile = null;
-      } catch (e) {
-        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, e);
+      } catch (e: unknown) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, errMsg);
       }
     }
 
@@ -838,8 +819,9 @@ export class SyncEngine {
         await this.ensureParentFolderExists(path);
         await this.app.vault.create(path, content);
       }
-    } catch (err) {
-      console.error(`[Kurotsuki] Error writing remote change to ${path}:`, err);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Kurotsuki] Error writing remote change to ${path}:`, errMsg);
     }
   }
 
@@ -880,9 +862,10 @@ export class SyncEngine {
         const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
         if (conflictingFolder && conflictingFolder instanceof TFolder) {
           try {
-            await this.app.vault.trash(conflictingFolder, true);
-          } catch (e) {
-            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, e);
+            await this.app.fileManager.trashFile(conflictingFolder);
+          } catch (e: unknown) {
+            const errMsg = e instanceof Error ? e.message : String(e);
+            console.warn(`[Kurotsuki] Could not clean up conflicting folder ${cleanPath}:`, errMsg);
           }
         }
 
@@ -916,7 +899,7 @@ export class SyncEngine {
           this.onFileRenamed?.(cleanPath, cleanOldPath);
 
           // Double check after 350ms to ensure no duplicate old file remains
-          setTimeout(async () => {
+          window.setTimeout(async () => {
             const stray = this.getFileByNormalizedPath(cleanOldPath);
             if (stray && stray instanceof TFile) {
               try {
@@ -935,13 +918,14 @@ export class SyncEngine {
           });
 
           // Delayed cleanup: if oldFile was in-flight and gets created shortly after, trash it
-          setTimeout(async () => {
+          window.setTimeout(async () => {
             const strayOld = this.getFileByNormalizedPath(cleanOldPath);
             if (strayOld && strayOld instanceof TFile) {
               try {
                 await this.app.fileManager.trashFile(strayOld);
-              } catch (e) {
-                console.warn(`[Kurotsuki] Cleaned up stray old file ${cleanOldPath}:`, e);
+              } catch (e: unknown) {
+                const errMsg = e instanceof Error ? e.message : String(e);
+                console.warn(`[Kurotsuki] Cleaned up stray old file ${cleanOldPath}:`, errMsg);
               }
             }
           }, 350);
@@ -958,8 +942,9 @@ export class SyncEngine {
           });
         }
       }
-    } catch (err) {
-      console.error(`[Kurotsuki] Error executing remote file event ${action}:`, err);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Kurotsuki] Error executing remote file event ${action}:`, errMsg);
     }
   }
 
@@ -994,8 +979,9 @@ export class SyncEngine {
           new Notice('🔒 Read-Only: Attachment upload blocked by server.');
         }
       }
-    } catch (err) {
-      console.error(`[Kurotsuki] Failed to sync attachment ${file.path}:`, err);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Kurotsuki] Failed to sync attachment ${file.path}:`, errMsg);
     }
   }
 
@@ -1060,19 +1046,11 @@ export class SyncEngine {
   public resetDocs(): void {
     this.flushAllOutgoingUpdates();
     for (const timer of this.pendingLocalDebounce.values()) {
-      if (typeof window !== 'undefined' && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
     }
     this.pendingLocalDebounce.clear();
     for (const timer of this.pendingOutgoingTimers.values()) {
-      if (typeof window !== 'undefined' && window.clearTimeout) {
-        window.clearTimeout(timer);
-      } else {
-        clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
     }
     this.pendingOutgoingTimers.clear();
     this.pendingOutgoingUpdates.clear();

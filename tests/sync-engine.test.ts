@@ -470,5 +470,18 @@ describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
     const deleteCheck = renamedOrDeletedPaths.get('Plan/Temporary.md');
     assert.strictEqual(deleteCheck, null);
   });
+
+  test('CodeMirror 6: remote transactions carry remoteSyncAnnotation and Transaction.addToHistory(false)', () => {
+    const { Transaction } = require('@codemirror/state');
+    let state = EditorState.create({ doc: 'Hello' });
+    const tr = state.update({
+      changes: { from: 5, insert: ' World' },
+      annotations: [remoteSyncAnnotation.of(true), Transaction.addToHistory.of(false)],
+    });
+    assert.strictEqual(tr.annotation(remoteSyncAnnotation), true);
+    assert.strictEqual(tr.annotation(Transaction.addToHistory), false);
+    state = tr.state;
+    assert.strictEqual(state.doc.toString(), 'Hello World');
+  });
 });
 
