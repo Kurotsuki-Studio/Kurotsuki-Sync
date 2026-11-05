@@ -18,7 +18,15 @@ export class SyncEngine {
   private historyLogs: SyncHistoryEntry[] = [];
   private lastUpdatePerFile: Map<string, { timestamp: number; author?: string }> = new Map();
   private serverKnownFiles: Set<string> = new Set();
+  private pendingUntitledCreations: Map<string, { file: TFile; timer: ReturnType<typeof setTimeout> }> = new Map();
+  private renamedOrDeletedPaths: Map<string, string | null> = new Map();
   public onFileRenamed?: (newPath: string, oldPath: string) => void;
+
+  private isUntitledFile(filePath: string): boolean {
+    const name = filePath.split('/').pop() || '';
+    const baseName = name.replace(/\.[^/.]+$/, '');
+    return /^(sans titre|untitled|nouvelle note|new note)(\s\d+)?$/i.test(baseName.trim());
+  }
 
   public getFileByNormalizedPath(rawPath: string): TAbstractFile | null {
     if (!rawPath) return null;
@@ -377,31 +385,53 @@ export class SyncEngine {
     if (this.isReadOnly()) return;
 
     if (file instanceof TFile) {
-      if (file.extension === 'md' || file.extension === 'txt' || file.extension === 'canvas') {
-        const content = await this.app.vault.read(file);
-        const doc = this.getOrCreateDoc(file.path, content);
-        const state = Y.encodeStateAsUpdate(doc);
-        this.wsClient.send({
-          type: 'yjs_sync',
-          path: file.path,
-          update: uint8ArrayToBase64(state),
-        });
-      } else if (this.settings.syncAttachments) {
-        await this.syncAttachment(file);
+      const cleanPath = normalizePath(file.path);
+
+      // Debounce untitled file creation (e.g. 'Sans titre.md', 'Untitled.md') to avoid sending temporary
+      // phantom files when the user immediately renames them upon creation
+      if (this.isUntitledFile(cleanPath)) {
+        const existingTimer = this.pendingUntitledCreations.get(cleanPath);
+        if (existingTimer) {
+          clearTimeout(existingTimer.timer);
+        }
+        const timer = setTimeout(() => {
+          this.pendingUntitledCreations.delete(cleanPath);
+          void this.broadcastFileCreated(file);
+        }, 500);
+        this.pendingUntitledCreations.set(cleanPath, { file, timer });
+        return;
       }
-      this.trackSyncedFile(file.path);
-      this.recordHistory({
-        type: 'file_event',
-        path: file.path,
-        summary: `Created file ${file.name}`,
-      });
-      this.wsClient.send({
-        type: 'file_event',
-        action: 'create',
-        path: file.path,
-        mtime: file.stat.mtime,
-      });
+
+      await this.broadcastFileCreated(file);
     }
+  }
+
+  private async broadcastFileCreated(file: TFile): Promise<void> {
+    const cleanPath = normalizePath(file.path);
+    if (file.extension === 'md' || file.extension === 'txt' || file.extension === 'canvas') {
+      const content = await this.app.vault.read(file);
+      const doc = this.getOrCreateDoc(cleanPath, content);
+      const state = Y.encodeStateAsUpdate(doc);
+      this.wsClient.send({
+        type: 'yjs_sync',
+        path: cleanPath,
+        update: uint8ArrayToBase64(state),
+      });
+    } else if (this.settings.syncAttachments) {
+      await this.syncAttachment(file);
+    }
+    this.trackSyncedFile(cleanPath);
+    this.recordHistory({
+      type: 'file_event',
+      path: cleanPath,
+      summary: `Created file ${file.name}`,
+    });
+    this.wsClient.send({
+      type: 'file_event',
+      action: 'create',
+      path: cleanPath,
+      mtime: file.stat.mtime,
+    });
   }
 
   public onLocalFileDeleted(file: TAbstractFile): void {
@@ -409,6 +439,13 @@ export class SyncEngine {
     if (!this.shouldSync(cleanPath)) return;
     if (this.isLocked(cleanPath)) return;
     if (this.isReadOnly()) return;
+
+    this.renamedOrDeletedPaths.set(cleanPath, null);
+    const pending = this.pendingUntitledCreations.get(cleanPath);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingUntitledCreations.delete(cleanPath);
+    }
 
     this.removeDoc(cleanPath);
     this.serverKnownFiles.delete(cleanPath);
@@ -433,8 +470,24 @@ export class SyncEngine {
     if (this.isLocked(cleanPath) || this.isLocked(cleanOldPath)) return;
     if (this.isReadOnly()) return;
 
+    // Check if the old path was a pending untitled file that hasn't been broadcast yet
+    const pending = this.pendingUntitledCreations.get(cleanOldPath);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingUntitledCreations.delete(cleanOldPath);
+      // The note was renamed before 'Sans titre' was ever broadcast to peers!
+      // Treat this directly as a brand-new creation of the final file!
+      if (file instanceof TFile) {
+        void this.broadcastFileCreated(file);
+        return;
+      }
+    }
+
     this.lockPath(cleanPath, 3000);
     this.lockPath(cleanOldPath, 3000);
+
+    // Track rename redirection to prevent stray in-flight doc responses from resurrecting cleanOldPath
+    this.renamedOrDeletedPaths.set(cleanOldPath, cleanPath);
 
     // Migrate doc if exists
     const doc = this.docs.get(cleanOldPath);
@@ -563,8 +616,18 @@ export class SyncEngine {
   }
 
   private async handleDocResponse(rawPath: string, updateB64: string): Promise<void> {
-    const path = normalizePath(rawPath);
+    let path = normalizePath(rawPath);
     if (!this.shouldSync(path)) return;
+
+    // Check if this doc was deleted or renamed while doc_request was in flight
+    const redirection = this.renamedOrDeletedPaths.get(path);
+    if (redirection === null) {
+      return; // Discard: doc was deleted remotely
+    }
+    if (redirection && redirection !== path) {
+      path = redirection; // Redirect incoming update to the newly renamed path
+    }
+
     const update = base64ToUint8Array(updateB64);
     const doc = this.getOrCreateDoc(path);
     Y.applyUpdate(doc, update, 'remote');
@@ -607,6 +670,11 @@ export class SyncEngine {
         }
       }
       await this.writeToVaultSafely(path, content);
+
+      // If this was a redirected rename, ensure open leaves switch to the new file
+      if (redirection && redirection !== rawPath) {
+        this.onFileRenamed?.(path, rawPath);
+      }
     }
   }
 
@@ -723,8 +791,18 @@ export class SyncEngine {
   }
 
   private async writeToVaultSafely(path: string, content: string): Promise<void> {
-    const abstractFile = this.getFileByNormalizedPath(path);
+    let abstractFile = this.getFileByNormalizedPath(path);
     this.lockPath(path, 1500);
+
+    // If an accidental folder with this exact path exists (e.g. from legacy v1.1.9), trash it first
+    if (abstractFile instanceof TFolder) {
+      try {
+        await this.app.vault.trash(abstractFile, true);
+        abstractFile = null;
+      } catch (e) {
+        console.warn(`[Kurotsuki] Could not remove conflicting folder ${path}:`, e);
+      }
+    }
 
     try {
       if (abstractFile instanceof TFile) {
@@ -760,6 +838,7 @@ export class SyncEngine {
       const file = this.getFileByNormalizedPath(cleanPath);
 
       if (action === 'delete') {
+        this.renamedOrDeletedPaths.set(cleanPath, null);
         if (file) {
           this.removeDoc(cleanPath);
           this.serverKnownFiles.delete(cleanPath);
@@ -771,6 +850,7 @@ export class SyncEngine {
 
         this.lockPath(cleanPath, 3000);
         this.lockPath(cleanOldPath, 3000);
+        this.renamedOrDeletedPaths.set(cleanOldPath, cleanPath);
 
         // If an accidental folder was created with the new file's name, remove it
         const conflictingFolder = this.getFileByNormalizedPath(cleanPath);
@@ -796,6 +876,16 @@ export class SyncEngine {
           await this.ensureParentFolderExists(cleanPath);
           await this.app.fileManager.renameFile(oldFile, cleanPath);
           this.onFileRenamed?.(cleanPath, cleanOldPath);
+
+          // Double check after 350ms to ensure no duplicate old file remains
+          setTimeout(async () => {
+            const stray = this.getFileByNormalizedPath(cleanOldPath);
+            if (stray && stray instanceof TFile) {
+              try {
+                await this.app.fileManager.trashFile(stray);
+              } catch { /* ignored */ }
+            }
+          }, 350);
         } else {
           // If oldFile was not yet on disk, track cleanPath and fetch directly
           this.serverKnownFiles.delete(cleanOldPath);
@@ -805,6 +895,18 @@ export class SyncEngine {
             type: 'doc_request',
             path: cleanPath,
           });
+
+          // Delayed cleanup: if oldFile was in-flight and gets created shortly after, trash it
+          setTimeout(async () => {
+            const strayOld = this.getFileByNormalizedPath(cleanOldPath);
+            if (strayOld && strayOld instanceof TFile) {
+              try {
+                await this.app.fileManager.trashFile(strayOld);
+              } catch (e) {
+                console.warn(`[Kurotsuki] Cleaned up stray old file ${cleanOldPath}:`, e);
+              }
+            }
+          }, 350);
         }
       } else if (action === 'create' || action === 'modify') {
         this.trackSyncedFile(cleanPath);

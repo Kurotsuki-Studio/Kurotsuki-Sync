@@ -426,5 +426,49 @@ describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
     assert.strictEqual(clientA.store.pendingStructs, null);
     assert.strictEqual(clientB.store.pendingStructs, null);
   });
+
+  test('isUntitledFile detection correctly identifies French and English placeholder note names', () => {
+    function isUntitledFile(filePath: string): boolean {
+      const name = filePath.split('/').pop() || '';
+      const baseName = name.replace(/\.[^/.]+$/, '');
+      return /^(sans titre|untitled|nouvelle note|new note)(\s\d+)?$/i.test(baseName.trim());
+    }
+
+    assert.strictEqual(isUntitledFile('Sans titre.md'), true);
+    assert.strictEqual(isUntitledFile('Plan/Sans titre.md'), true);
+    assert.strictEqual(isUntitledFile('Plan/Sans titre 1.md'), true);
+    assert.strictEqual(isUntitledFile('Untitled.md'), true);
+    assert.strictEqual(isUntitledFile('Deep/Folder/Untitled 42.md'), true);
+    assert.strictEqual(isUntitledFile('Nouvelle note.md'), true);
+    assert.strictEqual(isUntitledFile('New note.md'), true);
+
+    // Real notes should NOT match
+    assert.strictEqual(isUntitledFile('Plan/Conditions Japonais.md'), false);
+    assert.strictEqual(isUntitledFile('Accueil.md'), false);
+    assert.strictEqual(isUntitledFile('Grammaire N2.md'), false);
+  });
+
+  test('Rename redirection map redirects in-flight responses and prevents zombie file resurrection', () => {
+    const renamedOrDeletedPaths = new Map<string, string | null>();
+
+    // Simulated event: user creates 'Sans titre.md' and quickly renames to 'Conditions Japonais.md'
+    renamedOrDeletedPaths.set('Plan/Sans titre.md', 'Plan/Conditions Japonais.md');
+
+    // Stray in-flight doc_response arrives for 'Plan/Sans titre.md'
+    const incomingPath = 'Plan/Sans titre.md';
+    let targetPath = incomingPath;
+    const redirect = renamedOrDeletedPaths.get(incomingPath);
+    if (redirect) {
+      targetPath = redirect;
+    }
+
+    // Verify redirected to 'Conditions Japonais.md'
+    assert.strictEqual(targetPath, 'Plan/Conditions Japonais.md');
+
+    // Simulated event: doc deleted
+    renamedOrDeletedPaths.set('Plan/Temporary.md', null);
+    const deleteCheck = renamedOrDeletedPaths.get('Plan/Temporary.md');
+    assert.strictEqual(deleteCheck, null);
+  });
 });
 

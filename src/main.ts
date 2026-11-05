@@ -118,6 +118,15 @@ export default class KurotsukiSyncPlugin extends Plugin {
       }
       this.syncEngine.requestDocFromServer(cleanNew);
       this.app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view instanceof MarkdownView && leaf.view.file) {
+          const leafNorm = normalizePath(leaf.view.file.path);
+          if (leafNorm === cleanOld) {
+            const target = this.app.vault.getAbstractFileByPath(cleanNew);
+            if (target instanceof TFile) {
+              void leaf.openFile(target);
+            }
+          }
+        }
         if (leaf.view instanceof MarkdownView && leaf.view.editor) {
           const host = leaf.view.editor as unknown as CMEditorHost;
           if (host.cm && typeof host.cm.dispatch === 'function') {
