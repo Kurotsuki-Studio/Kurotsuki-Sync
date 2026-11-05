@@ -302,7 +302,7 @@ var RemoteCursorWidget = class extends import_view.WidgetType {
     return true;
   }
 };
-function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isReadOnly = () => false, onReadOnlyAttempt) {
+function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isReadOnly = () => false, onReadOnlyAttempt, onLocalEdit) {
   const collabPlugin = import_view.ViewPlugin.fromClass(
     class {
       constructor(view) {
@@ -458,6 +458,9 @@ function createCollabExtension(awareness, getActiveFilePath, getYDocForPath, isR
         if (update.docChanged && !this.isDispatchingRemote) {
           const isRemote = update.transactions.some((tr) => tr.annotation(remoteSyncAnnotation));
           if (!isRemote && this.currentYText && !isReadOnly()) {
+            if (this.boundPath && onLocalEdit) {
+              onLocalEdit(this.boundPath);
+            }
             const yText = this.currentYText;
             const doc2 = yText.doc;
             if (doc2) {
@@ -9320,7 +9323,7 @@ var SyncEngine = class {
     this.historyLogs = [];
     this.lastUpdatePerFile = /* @__PURE__ */ new Map();
     this.serverKnownFiles = /* @__PURE__ */ new Set();
-    this.pendingUntitledCreations = /* @__PURE__ */ new Map();
+    this.unbroadcastUntitled = /* @__PURE__ */ new Set();
     this.renamedOrDeletedPaths = /* @__PURE__ */ new Map();
     this.app = app;
     this.settings = settings;
@@ -9328,9 +9331,20 @@ var SyncEngine = class {
     this.wsClient.onMessage((msg) => this.handleServerMessage(msg));
   }
   isUntitledFile(filePath) {
-    const name = filePath.split("/").pop() || "";
+    const clean = normalizePath(filePath);
+    const name = clean.split("/").pop() || "";
     const baseName = name.replace(/\.[^/.]+$/, "");
     return /^(sans titre|untitled|nouvelle note|new note)(\s\d+)?$/i.test(baseName.trim());
+  }
+  promoteUnbroadcastNote(rawPath) {
+    const clean = normalizePath(rawPath);
+    if (this.unbroadcastUntitled.has(clean)) {
+      this.unbroadcastUntitled.delete(clean);
+      const file = this.getFileByNormalizedPath(clean);
+      if (file instanceof import_obsidian3.TFile) {
+        void this.broadcastFileCreated(file);
+      }
+    }
   }
   getFileByNormalizedPath(rawPath) {
     if (!rawPath)
@@ -9511,6 +9525,14 @@ var SyncEngine = class {
     if (this.isReadOnly()) {
       return;
     }
+    if (this.unbroadcastUntitled.has(cleanPath)) {
+      const content = await this.app.vault.read(file);
+      if (content.trim().length > 0) {
+        this.unbroadcastUntitled.delete(cleanPath);
+        await this.broadcastFileCreated(file);
+        return;
+      }
+    }
     if (this.isOpenInEditor(cleanPath)) {
       return;
     }
@@ -9616,25 +9638,20 @@ var SyncEngine = class {
     return ext !== "md" && ext !== "txt" && ext !== "canvas";
   }
   async onLocalFileCreated(file) {
-    if (!this.shouldSync(file.path))
+    const cleanPath = normalizePath(file.path);
+    if (!this.shouldSync(cleanPath))
       return;
-    if (this.isLocked(file.path))
+    if (this.isLocked(cleanPath))
       return;
     if (this.isReadOnly())
       return;
     if (file instanceof import_obsidian3.TFile) {
-      const cleanPath = normalizePath(file.path);
       if (this.isUntitledFile(cleanPath)) {
-        const existingTimer = this.pendingUntitledCreations.get(cleanPath);
-        if (existingTimer) {
-          clearTimeout(existingTimer.timer);
+        const content = await this.app.vault.read(file);
+        if (content.trim().length === 0) {
+          this.unbroadcastUntitled.add(cleanPath);
+          return;
         }
-        const timer = setTimeout(() => {
-          this.pendingUntitledCreations.delete(cleanPath);
-          void this.broadcastFileCreated(file);
-        }, 500);
-        this.pendingUntitledCreations.set(cleanPath, { file, timer });
-        return;
       }
       await this.broadcastFileCreated(file);
     }
@@ -9668,6 +9685,10 @@ var SyncEngine = class {
   }
   onLocalFileDeleted(file) {
     const cleanPath = normalizePath(file.path);
+    if (this.unbroadcastUntitled.has(cleanPath)) {
+      this.unbroadcastUntitled.delete(cleanPath);
+      return;
+    }
     if (!this.shouldSync(cleanPath))
       return;
     if (this.isLocked(cleanPath))
@@ -9675,11 +9696,6 @@ var SyncEngine = class {
     if (this.isReadOnly())
       return;
     this.renamedOrDeletedPaths.set(cleanPath, null);
-    const pending = this.pendingUntitledCreations.get(cleanPath);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingUntitledCreations.delete(cleanPath);
-    }
     this.removeDoc(cleanPath);
     this.serverKnownFiles.delete(cleanPath);
     this.untrackSyncedFile(cleanPath);
@@ -9704,10 +9720,8 @@ var SyncEngine = class {
       return;
     if (this.isReadOnly())
       return;
-    const pending = this.pendingUntitledCreations.get(cleanOldPath);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingUntitledCreations.delete(cleanOldPath);
+    if (this.unbroadcastUntitled.has(cleanOldPath)) {
+      this.unbroadcastUntitled.delete(cleanOldPath);
       if (file instanceof import_obsidian3.TFile) {
         void this.broadcastFileCreated(file);
         return;
@@ -9800,6 +9814,15 @@ var SyncEngine = class {
       const cleanLocalPath = normalizePath(file.path);
       if (!this.shouldSync(cleanLocalPath))
         continue;
+      if (this.isUntitledFile(cleanLocalPath)) {
+        if (file.stat.size === 0) {
+          try {
+            await this.app.fileManager.trashFile(file);
+          } catch {
+          }
+        }
+        continue;
+      }
       if (!remotePaths.has(cleanLocalPath)) {
         if (!this.isReadOnly()) {
           this.trackSyncedFile(cleanLocalPath);
@@ -10053,7 +10076,22 @@ var SyncEngine = class {
           this.untrackSyncedFile(cleanOldPath);
           this.trackSyncedFile(cleanPath);
           await this.ensureParentFolderExists(cleanPath);
-          await this.app.fileManager.renameFile(oldFile, cleanPath);
+          const existingTarget = this.getFileByNormalizedPath(cleanPath);
+          if (existingTarget && existingTarget instanceof import_obsidian3.TFile) {
+            try {
+              await this.app.fileManager.trashFile(oldFile);
+            } catch {
+            }
+          } else {
+            try {
+              await this.app.fileManager.renameFile(oldFile, cleanPath);
+            } catch {
+              try {
+                await this.app.fileManager.trashFile(oldFile);
+              } catch {
+              }
+            }
+          }
           this.onFileRenamed?.(cleanPath, cleanOldPath);
           setTimeout(async () => {
             const stray = this.getFileByNormalizedPath(cleanOldPath);
@@ -10151,15 +10189,17 @@ var SyncEngine = class {
       }
     }
   }
-  lockPath(path, durationMs) {
-    this.remoteUpdateLocks.set(path, Date.now() + durationMs);
+  lockPath(rawPath, durationMs) {
+    const clean = normalizePath(rawPath);
+    this.remoteUpdateLocks.set(clean, Date.now() + durationMs);
   }
-  isLocked(path) {
-    const expiry = this.remoteUpdateLocks.get(path);
+  isLocked(rawPath) {
+    const clean = normalizePath(rawPath);
+    const expiry = this.remoteUpdateLocks.get(clean);
     if (!expiry)
       return false;
     if (Date.now() > expiry) {
-      this.remoteUpdateLocks.delete(path);
+      this.remoteUpdateLocks.delete(clean);
       return false;
     }
     return true;
@@ -11003,7 +11043,8 @@ var KurotsukiSyncPlugin = class extends import_obsidian8.Plugin {
         (view) => this.getPathForView(view),
         (path) => this.syncEngine.getOrCreateDoc(path),
         () => this.syncEngine.isReadOnly(),
-        () => this.notifyReadOnlyAttempt()
+        () => this.notifyReadOnlyAttempt(),
+        (path) => this.syncEngine.promoteUnbroadcastNote(path)
       )
     );
     this.registerView(

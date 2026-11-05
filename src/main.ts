@@ -63,7 +63,8 @@ export default class KurotsukiSyncPlugin extends Plugin {
         (view?: EditorView) => this.getPathForView(view),
         (path: string) => this.syncEngine.getOrCreateDoc(path),
         () => this.syncEngine.isReadOnly(),
-        () => this.notifyReadOnlyAttempt()
+        () => this.notifyReadOnlyAttempt(),
+        (path: string) => this.syncEngine.promoteUnbroadcastNote(path)
       )
     );
 

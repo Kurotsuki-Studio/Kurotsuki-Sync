@@ -117,7 +117,8 @@ export function createCollabExtension(
   getActiveFilePath: (view?: EditorView) => string | null,
   getYDocForPath: (path: string) => Y.Doc | null,
   isReadOnly: () => boolean = () => false,
-  onReadOnlyAttempt?: () => void
+  onReadOnlyAttempt?: () => void,
+  onLocalEdit?: (path: string) => void
 ): Extension {
   // 1. Live Yjs text synchronization & Remote cursor decorations
   const collabPlugin = ViewPlugin.fromClass(
@@ -301,6 +302,9 @@ export function createCollabExtension(
         if (update.docChanged && !this.isDispatchingRemote) {
           const isRemote = update.transactions.some((tr) => tr.annotation(remoteSyncAnnotation));
           if (!isRemote && this.currentYText && !isReadOnly()) {
+            if (this.boundPath && onLocalEdit) {
+              onLocalEdit(this.boundPath);
+            }
             const yText = this.currentYText;
             const doc = yText.doc;
             if (doc) {

@@ -18,14 +18,26 @@ export class SyncEngine {
   private historyLogs: SyncHistoryEntry[] = [];
   private lastUpdatePerFile: Map<string, { timestamp: number; author?: string }> = new Map();
   private serverKnownFiles: Set<string> = new Set();
-  private pendingUntitledCreations: Map<string, { file: TFile; timer: ReturnType<typeof setTimeout> }> = new Map();
+  private unbroadcastUntitled: Set<string> = new Set();
   private renamedOrDeletedPaths: Map<string, string | null> = new Map();
   public onFileRenamed?: (newPath: string, oldPath: string) => void;
 
   private isUntitledFile(filePath: string): boolean {
-    const name = filePath.split('/').pop() || '';
+    const clean = normalizePath(filePath);
+    const name = clean.split('/').pop() || '';
     const baseName = name.replace(/\.[^/.]+$/, '');
     return /^(sans titre|untitled|nouvelle note|new note)(\s\d+)?$/i.test(baseName.trim());
+  }
+
+  public promoteUnbroadcastNote(rawPath: string): void {
+    const clean = normalizePath(rawPath);
+    if (this.unbroadcastUntitled.has(clean)) {
+      this.unbroadcastUntitled.delete(clean);
+      const file = this.getFileByNormalizedPath(clean);
+      if (file instanceof TFile) {
+        void this.broadcastFileCreated(file);
+      }
+    }
   }
 
   public getFileByNormalizedPath(rawPath: string): TAbstractFile | null {
@@ -249,6 +261,16 @@ export class SyncEngine {
       return;
     }
 
+    // If this was an unbroadcast untitled note, promote it as soon as content is written
+    if (this.unbroadcastUntitled.has(cleanPath)) {
+      const content = await this.app.vault.read(file);
+      if (content.trim().length > 0) {
+        this.unbroadcastUntitled.delete(cleanPath);
+        await this.broadcastFileCreated(file);
+        return;
+      }
+    }
+
     // IMPORTANT: If this file is currently open in ANY editor in Obsidian,
     // the CM6 extension is ALREADY tracking every keystroke directly into Yjs!
     // Do NOT read stale disk cache and do NOT overwrite Yjs while user is typing!
@@ -380,26 +402,20 @@ export class SyncEngine {
   }
 
   public async onLocalFileCreated(file: TAbstractFile): Promise<void> {
-    if (!this.shouldSync(file.path)) return;
-    if (this.isLocked(file.path)) return;
+    const cleanPath = normalizePath(file.path);
+    if (!this.shouldSync(cleanPath)) return;
+    if (this.isLocked(cleanPath)) return;
     if (this.isReadOnly()) return;
 
     if (file instanceof TFile) {
-      const cleanPath = normalizePath(file.path);
-
-      // Debounce untitled file creation (e.g. 'Sans titre.md', 'Untitled.md') to avoid sending temporary
-      // phantom files when the user immediately renames them upon creation
+      // If this is an untitled placeholder note (e.g. 'Sans titre.md', 'Untitled.md') and is currently empty:
+      // Hold back broadcast until the user starts typing content or renames it.
       if (this.isUntitledFile(cleanPath)) {
-        const existingTimer = this.pendingUntitledCreations.get(cleanPath);
-        if (existingTimer) {
-          clearTimeout(existingTimer.timer);
+        const content = await this.app.vault.read(file);
+        if (content.trim().length === 0) {
+          this.unbroadcastUntitled.add(cleanPath);
+          return;
         }
-        const timer = setTimeout(() => {
-          this.pendingUntitledCreations.delete(cleanPath);
-          void this.broadcastFileCreated(file);
-        }, 500);
-        this.pendingUntitledCreations.set(cleanPath, { file, timer });
-        return;
       }
 
       await this.broadcastFileCreated(file);
@@ -436,17 +452,16 @@ export class SyncEngine {
 
   public onLocalFileDeleted(file: TAbstractFile): void {
     const cleanPath = normalizePath(file.path);
+    if (this.unbroadcastUntitled.has(cleanPath)) {
+      this.unbroadcastUntitled.delete(cleanPath);
+      return; // Never broadcast to network, so no need to send delete event
+    }
+
     if (!this.shouldSync(cleanPath)) return;
     if (this.isLocked(cleanPath)) return;
     if (this.isReadOnly()) return;
 
     this.renamedOrDeletedPaths.set(cleanPath, null);
-    const pending = this.pendingUntitledCreations.get(cleanPath);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingUntitledCreations.delete(cleanPath);
-    }
-
     this.removeDoc(cleanPath);
     this.serverKnownFiles.delete(cleanPath);
     this.untrackSyncedFile(cleanPath);
@@ -470,13 +485,11 @@ export class SyncEngine {
     if (this.isLocked(cleanPath) || this.isLocked(cleanOldPath)) return;
     if (this.isReadOnly()) return;
 
-    // Check if the old path was a pending untitled file that hasn't been broadcast yet
-    const pending = this.pendingUntitledCreations.get(cleanOldPath);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingUntitledCreations.delete(cleanOldPath);
-      // The note was renamed before 'Sans titre' was ever broadcast to peers!
-      // Treat this directly as a brand-new creation of the final file!
+    // Check if the old path was an unbroadcast untitled placeholder note
+    if (this.unbroadcastUntitled.has(cleanOldPath)) {
+      this.unbroadcastUntitled.delete(cleanOldPath);
+      // The placeholder note was renamed to its final name before ever being broadcast!
+      // Broadcast this directly as a brand-new creation of the final file!
       if (file instanceof TFile) {
         void this.broadcastFileCreated(file);
         return;
@@ -579,11 +592,22 @@ export class SyncEngine {
       }
     }
 
-    // 2. Check local files: if server doesn't have it, upload/push it to server! (NEVER delete local files)
+    // 2. Check local files: if server doesn't have it, upload/push it to server! (NEVER delete user content)
     const localFiles = this.app.vault.getFiles();
     for (const file of localFiles) {
       const cleanLocalPath = normalizePath(file.path);
       if (!this.shouldSync(cleanLocalPath)) continue;
+
+      // Never auto-seed unbroadcast or orphaned untitled placeholder notes
+      if (this.isUntitledFile(cleanLocalPath)) {
+        if (file.stat.size === 0) {
+          try {
+            await this.app.fileManager.trashFile(file);
+          } catch { /* ignored */ }
+        }
+        continue;
+      }
+
       if (!remotePaths.has(cleanLocalPath)) {
         if (!this.isReadOnly()) {
           this.trackSyncedFile(cleanLocalPath);
@@ -874,7 +898,21 @@ export class SyncEngine {
           this.untrackSyncedFile(cleanOldPath);
           this.trackSyncedFile(cleanPath);
           await this.ensureParentFolderExists(cleanPath);
-          await this.app.fileManager.renameFile(oldFile, cleanPath);
+          const existingTarget = this.getFileByNormalizedPath(cleanPath);
+          if (existingTarget && existingTarget instanceof TFile) {
+            // Target already exists on disk -> trash oldFile directly to avoid duplicate collision
+            try {
+              await this.app.fileManager.trashFile(oldFile);
+            } catch { /* ignored */ }
+          } else {
+            try {
+              await this.app.fileManager.renameFile(oldFile, cleanPath);
+            } catch {
+              try {
+                await this.app.fileManager.trashFile(oldFile);
+              } catch { /* ignored */ }
+            }
+          }
           this.onFileRenamed?.(cleanPath, cleanOldPath);
 
           // Double check after 350ms to ensure no duplicate old file remains
@@ -983,15 +1021,17 @@ export class SyncEngine {
     }
   }
 
-  private lockPath(path: string, durationMs: number): void {
-    this.remoteUpdateLocks.set(path, Date.now() + durationMs);
+  private lockPath(rawPath: string, durationMs: number): void {
+    const clean = normalizePath(rawPath);
+    this.remoteUpdateLocks.set(clean, Date.now() + durationMs);
   }
 
-  public isLocked(path: string): boolean {
-    const expiry = this.remoteUpdateLocks.get(path);
+  public isLocked(rawPath: string): boolean {
+    const clean = normalizePath(rawPath);
+    const expiry = this.remoteUpdateLocks.get(clean);
     if (!expiry) return false;
     if (Date.now() > expiry) {
-      this.remoteUpdateLocks.delete(path);
+      this.remoteUpdateLocks.delete(clean);
       return false;
     }
     return true;
