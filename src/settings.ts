@@ -91,6 +91,83 @@ export class KurotsukiSettingTab extends PluginSettingTab {
           })
       );
 
+    const accounts = this.plugin.settings.savedAccounts ?? [];
+    new Setting(containerEl)
+      .setName('Account / Login Profile')
+      .setDesc('Choose a saved account to log in with, or save the current token as a reusable account')
+      .addDropdown((dropdown) => {
+        dropdown.addOption('', 'Custom / Manual Token');
+        for (const acc of accounts) {
+          dropdown.addOption(acc.id, acc.label);
+        }
+        dropdown.setValue(this.plugin.settings.activeAccountId || '');
+        dropdown.onChange(async (accId) => {
+          this.plugin.settings.activeAccountId = accId;
+          if (accId) {
+            const selected = (this.plugin.settings.savedAccounts ?? []).find((a) => a.id === accId);
+            if (selected) {
+              this.plugin.settings.authToken = selected.authToken;
+              if (selected.userName) {
+                this.plugin.settings.userName = selected.userName;
+                this.plugin.awareness.updateUserProfile({ name: selected.userName });
+              }
+            }
+          }
+          await this.plugin.saveSettings();
+          this.plugin.wsClient.disconnect(false);
+          if (this.plugin.settings.serverUrl) {
+            this.plugin.wsClient.connect();
+          }
+          this.display();
+        });
+      })
+      .addButton((btn) =>
+        btn
+          .setButtonText('Save Account')
+          .onClick(async () => {
+            const token = this.plugin.settings.authToken.trim();
+            if (!token) {
+              new Notice('⚠️ Enter an Auth Token first before saving an account.');
+              return;
+            }
+            const label = this.plugin.settings.userName?.trim() || `Account ${accounts.length + 1}`;
+            const list = [...(this.plugin.settings.savedAccounts ?? [])];
+            const existing = list.find((a) => a.authToken === token);
+            if (existing) {
+              existing.label = label;
+              existing.userName = this.plugin.settings.userName;
+              this.plugin.settings.activeAccountId = existing.id;
+            } else {
+              const id = 'acc_' + Date.now().toString(36);
+              list.push({
+                id,
+                label,
+                authToken: token,
+                userName: this.plugin.settings.userName,
+              });
+              this.plugin.settings.savedAccounts = list;
+              this.plugin.settings.activeAccountId = id;
+            }
+            await this.plugin.saveSettings();
+            new Notice(`✅ Saved account "${label}"`);
+            this.display();
+          })
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText('Remove')
+          .setDisabled(!this.plugin.settings.activeAccountId)
+          .onClick(async () => {
+            const activeId = this.plugin.settings.activeAccountId;
+            if (!activeId) return;
+            this.plugin.settings.savedAccounts = (this.plugin.settings.savedAccounts ?? []).filter((a) => a.id !== activeId);
+            this.plugin.settings.activeAccountId = '';
+            await this.plugin.saveSettings();
+            new Notice('🗑️ Removed saved account');
+            this.display();
+          })
+      );
+
     new Setting(containerEl)
       .setName('Auth Token / Secret')
       .setDesc('Optional shared password/token for private relay rooms')
@@ -100,6 +177,7 @@ export class KurotsukiSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.authToken)
           .onChange(async (val) => {
             this.plugin.settings.authToken = val.trim();
+            this.plugin.settings.activeAccountId = '';
             await this.plugin.saveSettings();
           })
       );
@@ -127,16 +205,31 @@ export class KurotsukiSettingTab extends PluginSettingTab {
                 new Notice(`⚠️ Le serveur ne répond pas (HTTP ${res.status})`);
                 return;
               }
-              const statsRes = await requestUrl({
-                url: `${httpBase}/api/v1/stats`,
+              const vaultId = this.plugin.settings.vaultId || 'default-vault';
+              const whoamiRes = await requestUrl({
+                url: `${httpBase}/api/v1/auth/whoami?vaultId=${encodeURIComponent(vaultId)}`,
                 headers: { Authorization: `Bearer ${this.plugin.settings.authToken}` },
                 throw: false,
               });
-              if (statsRes.status === 401) {
-                new Notice('❌ Token / Mot de passe incorrect ! Le serveur refuse la connexion.');
+              if (whoamiRes.status === 401) {
+                new Notice(`❌ Token invalide ou accès refusé pour le vault "${vaultId}" !`);
                 return;
               }
-              new Notice('✅ Connexion et mot de passe validés !');
+              if (whoamiRes.status === 200) {
+                const info = whoamiRes.json as { accountName?: string; role?: string; vaultId?: string };
+                new Notice(`✅ Connecté en tant que "${info.accountName || 'User'}" (${info.role || 'editor'} sur ${info.vaultId || vaultId}) !`);
+              } else {
+                const statsRes = await requestUrl({
+                  url: `${httpBase}/api/v1/stats`,
+                  headers: { Authorization: `Bearer ${this.plugin.settings.authToken}` },
+                  throw: false,
+                });
+                if (statsRes.status === 401) {
+                  new Notice('❌ Token / Mot de passe incorrect ! Le serveur refuse la connexion.');
+                  return;
+                }
+                new Notice('✅ Connexion et mot de passe validés !');
+              }
               this.plugin.wsClient.disconnect(false);
               this.plugin.wsClient.connect();
             } catch (err: unknown) {

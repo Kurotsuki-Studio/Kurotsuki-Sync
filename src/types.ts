@@ -35,6 +35,13 @@ export interface VaultProfile {
   sharedFolders?: string[];
 }
 
+export interface SavedAccount {
+  id: string;
+  label: string;
+  authToken: string;
+  userName?: string;
+}
+
 export interface KurotsukiSettings {
   serverUrl: string;
   authToken: string;
@@ -50,6 +57,8 @@ export interface KurotsukiSettings {
   currentRole: UserRole;
   vaultProfiles: VaultProfile[];
   activeProfileId: string;
+  savedAccounts?: SavedAccount[];
+  activeAccountId?: string;
   syncedFiles?: Record<string, number>;
 }
 
@@ -66,6 +75,8 @@ export const DEFAULT_SETTINGS: KurotsukiSettings = {
   autoConnect: true,
   enableLiveCursors: true,
   currentRole: 'unknown',
+  savedAccounts: [],
+  activeAccountId: '',
   syncedFiles: {},
   vaultProfiles: [
     {
