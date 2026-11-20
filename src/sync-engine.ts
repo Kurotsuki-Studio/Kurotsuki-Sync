@@ -638,7 +638,10 @@ export class SyncEngine {
       }
     }
 
-    // 2. Check local files: if server doesn't have it, upload/push it to server! (NEVER delete user content)
+    // 2. Check local files:
+    //    - If previously synced (in syncedFiles) and missing from server -> it was deleted/renamed remotely while offline -> trash locally!
+    //    - If never synced before -> genuinely new offline file -> upload/push to server!
+    const syncedMap = this.getSyncedFilesMap();
     const localFiles = this.app.vault.getFiles();
     for (const file of localFiles) {
       const cleanLocalPath = normalizePath(file.path);
@@ -655,6 +658,23 @@ export class SyncEngine {
       }
 
       if (!remotePaths.has(cleanLocalPath)) {
+        if (syncedMap[cleanLocalPath]) {
+          // Previously synced file is no longer on server -> deleted or renamed on another device while offline
+          this.lockPath(cleanLocalPath, 3000);
+          this.renamedOrDeletedPaths.set(cleanLocalPath, null);
+          this.removeDoc(cleanLocalPath);
+          this.untrackSyncedFile(cleanLocalPath);
+          try {
+            await this.app.fileManager.trashFile(file);
+            this.recordHistory({
+              type: 'file_event',
+              path: cleanLocalPath,
+              summary: `Trashed stale local file ${cleanLocalPath} (deleted or renamed remotely)`,
+            });
+          } catch { /* ignored */ }
+          continue;
+        }
+
         if (!this.isReadOnly()) {
           this.trackSyncedFile(cleanLocalPath);
           this.serverKnownFiles.add(cleanLocalPath);
@@ -899,6 +919,11 @@ export class SyncEngine {
 
       if (action === 'delete') {
         this.renamedOrDeletedPaths.set(cleanPath, null);
+        const pendingTimer = this.pendingOutgoingTimers.get(cleanPath);
+        if (pendingTimer !== undefined) {
+          window.clearTimeout(pendingTimer);
+          this.pendingOutgoingTimers.delete(cleanPath);
+        }
         if (file) {
           if (file instanceof TFile) {
             this.removeDoc(cleanPath);
@@ -934,9 +959,15 @@ export class SyncEngine {
       if (action === 'rename' && cleanOldPath) {
         if (!this.shouldSync(cleanPath) && !this.shouldSync(cleanOldPath)) return;
 
-        this.lockPath(cleanPath, 3000);
-        this.lockPath(cleanOldPath, 3000);
+        this.lockPath(cleanPath, 5000);
+        this.lockPath(cleanOldPath, 5000);
         this.renamedOrDeletedPaths.set(cleanOldPath, cleanPath);
+
+        const pendingOldTimer = this.pendingOutgoingTimers.get(cleanOldPath);
+        if (pendingOldTimer !== undefined) {
+          window.clearTimeout(pendingOldTimer);
+          this.pendingOutgoingTimers.delete(cleanOldPath);
+        }
 
         const oldFile = this.getFileByNormalizedPath(cleanOldPath);
         if (oldFile && oldFile instanceof TFile) {

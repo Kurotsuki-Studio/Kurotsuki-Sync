@@ -529,5 +529,22 @@ describe('Plugin Logic: Encoders, Selectors, and Awareness', () => {
     assert.strictEqual(isAttachmentPath('image.png'), true);
     assert.strictEqual(isAttachmentPath('archive.zip'), true);
   });
+
+  test('Reconcile logic: distinguishes previously synced stale files from brand-new offline files', () => {
+    const remotePaths = new Set(['RenamedNote.md']);
+    const syncedFiles: Record<string, number> = {
+      'OldNote.md': 1700000000000,
+    };
+
+    const classifyLocalFile = (path: string) => {
+      if (remotePaths.has(path)) return 'in_sync';
+      if (syncedFiles[path]) return 'trash_stale';
+      return 'upload_new';
+    };
+
+    assert.strictEqual(classifyLocalFile('RenamedNote.md'), 'in_sync');
+    assert.strictEqual(classifyLocalFile('OldNote.md'), 'trash_stale');
+    assert.strictEqual(classifyLocalFile('BrandNewOffline.md'), 'upload_new');
+  });
 });
 

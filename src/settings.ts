@@ -1,7 +1,78 @@
-import { App, Notice, PluginSettingTab, Setting, requestUrl, type SettingDefinitionItem } from 'obsidian';
+import { App, Modal, Notice, PluginSettingTab, Setting, requestUrl, type SettingDefinitionItem } from 'obsidian';
 import type KurotsukiSyncPlugin from './main';
 import { SyncMode } from './types';
 import { VaultSwitcherModal } from './ui/vault-switcher-modal';
+
+class PasteInviteModal extends Modal {
+  private onApply: (data: { serverUrl?: string; vaultId?: string; authToken?: string; userName?: string }) => Promise<void>;
+
+  constructor(
+    app: App,
+    onApply: (data: { serverUrl?: string; vaultId?: string; authToken?: string; userName?: string }) => Promise<void>
+  ) {
+    super(app);
+    this.onApply = onApply;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: '📋 Quick Import Server Invite' });
+    contentEl.createEl('p', {
+      text: 'Paste the invite text copied from the Kurotsuki Sync Admin Panel (or JSON config) to auto-fill Server URL, Vault ID, and Auth Token.',
+      cls: 'kurotsuki-settings-desc',
+    });
+
+    const textarea = contentEl.createEl('textarea', {
+      attr: {
+        rows: '6',
+        placeholder: 'Server URL: wss://relay.example.com\nVault ID: my-vault\nAuth Token: kuro_...',
+        style: 'width: 100%; font-family: var(--font-monospace); font-size: 12px; padding: 8px; margin-bottom: 12px;',
+      },
+    });
+
+    const btnRow = contentEl.createDiv({ attr: { style: 'display: flex; justify-content: flex-end; gap: 8px;' } });
+    const cancelBtn = btnRow.createEl('button', { text: 'Cancel' });
+    cancelBtn.addEventListener('click', () => this.close());
+
+    const applyBtn = btnRow.createEl('button', { text: 'Apply & Connect', cls: 'mod-cta' });
+    applyBtn.addEventListener('click', async () => {
+      const raw = textarea.value.trim();
+      if (!raw) {
+        new Notice('⚠️ Please paste an invite snippet first.');
+        return;
+      }
+
+      const parsed: { serverUrl?: string; vaultId?: string; authToken?: string; userName?: string } = {};
+      try {
+        const json = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof json.serverUrl === 'string') parsed.serverUrl = json.serverUrl.trim();
+        if (typeof json.vaultId === 'string') parsed.vaultId = json.vaultId.trim();
+        if (typeof json.token === 'string') parsed.authToken = json.token.trim();
+        if (typeof json.authToken === 'string') parsed.authToken = json.authToken.trim();
+      } catch {
+        for (const line of raw.split(/\r?\n/)) {
+          const urlMatch = line.match(/^\s*Server\s*URL\s*:\s*(.+)$/i);
+          if (urlMatch) parsed.serverUrl = urlMatch[1].trim();
+          const vaultMatch = line.match(/^\s*(?:Vault|Room)\s*ID\s*:\s*(.+)$/i);
+          if (vaultMatch) parsed.vaultId = vaultMatch[1].trim();
+          const tokenMatch = line.match(/^\s*(?:Auth\s*)?Token(?:\s*Secret)?\s*:\s*(.+)$/i);
+          if (tokenMatch) parsed.authToken = tokenMatch[1].trim();
+          const userMatch = line.match(/^\s*User\s*:\s*([^(\r\n]+)/i);
+          if (userMatch) parsed.userName = userMatch[1].trim();
+        }
+      }
+
+      if (!parsed.serverUrl && !parsed.vaultId && !parsed.authToken) {
+        new Notice('❌ Could not detect Server URL, Vault ID, or Auth Token in pasted text.');
+        return;
+      }
+
+      await this.onApply(parsed);
+      this.close();
+    });
+  }
+}
 
 export class KurotsukiSettingTab extends PluginSettingTab {
   plugin: KurotsukiSyncPlugin;
@@ -42,6 +113,20 @@ export class KurotsukiSettingTab extends PluginSettingTab {
       bannerRow.createSpan({ text: ` • Ping: ${latency}ms` });
     }
 
+    const bannerActions = banner.createDiv({ attr: { style: 'display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;' } });
+    const reconnectBtn = bannerActions.createEl('button', { text: '🔄 Reconnect', cls: 'mod-cta' });
+    reconnectBtn.addEventListener('click', () => {
+      this.plugin.wsClient.disconnect(false);
+      this.plugin.wsClient.connect();
+      new Notice('🔄 Reconnecting to relay...');
+      window.setTimeout(() => this.display(), 600);
+    });
+    const syncNowBtn = bannerActions.createEl('button', { text: '⚡ Sync Now' });
+    syncNowBtn.addEventListener('click', () => {
+      this.plugin.syncEngine.reconcileVault();
+      new Notice('⚡ Vault reconciliation triggered');
+    });
+
     if (role === 'viewer') {
       const viewerNotice = banner.createDiv({ cls: 'kurotsuki-banner-subnotice' });
       viewerNotice.textContent = '🔒 Read-Only Active: Editor changes in Obsidian are locked and local saves will not overwrite the relay.';
@@ -64,6 +149,35 @@ export class KurotsukiSettingTab extends PluginSettingTab {
 
     // Server Configuration Header
     new Setting(containerEl).setName('🌐 Server Connection').setHeading();
+
+    new Setting(containerEl)
+      .setName('Quick Import Invite')
+      .setDesc('Paste the connection invite from your server admin panel to auto-fill URL, Vault ID, and Token')
+      .addButton((btn) =>
+        btn
+          .setButtonText('📋 Paste Invite')
+          .onClick(() => {
+            new PasteInviteModal(this.app, async (parsed) => {
+              if (parsed.serverUrl) this.plugin.settings.serverUrl = parsed.serverUrl;
+              if (parsed.vaultId) this.plugin.settings.vaultId = parsed.vaultId;
+              if (parsed.authToken) {
+                this.plugin.settings.authToken = parsed.authToken;
+                this.plugin.settings.activeAccountId = '';
+              }
+              if (parsed.userName && (!this.plugin.settings.userName || this.plugin.settings.userName === 'Obsidian User')) {
+                this.plugin.settings.userName = parsed.userName;
+                this.plugin.awareness.updateUserProfile({ name: parsed.userName });
+              }
+              await this.plugin.saveSettings();
+              this.plugin.wsClient.disconnect(false);
+              if (this.plugin.settings.serverUrl) {
+                this.plugin.wsClient.connect();
+              }
+              new Notice('✅ Invite applied! Connecting to relay...');
+              this.display();
+            }).open();
+          })
+      );
 
     new Setting(containerEl)
       .setName('Relay Server URL')
